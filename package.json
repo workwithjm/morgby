@@ -1,0 +1,22 @@
+{
+"name": "morgby-surveillance",
+"version": "1.0.0",
+"private": true,
+"dependencies": {
+"react": "^18.2.0",
+"react-dom": "^18.2.0",
+"lucide-react": "^0.284.0",
+"clsx": "^2.0.0",
+"tailwind-merge": "^1.14.0"
+},
+"scripts": {
+"start": "react-scripts start",
+"build": "react-scripts build"
+},
+"devDependencies": {
+"react-scripts": "5.0.1",
+"tailwindcss": "^3.3.0",
+"autoprefixer": "^10.4.14",
+"postcss": "^8.4.21"
+}
+}
