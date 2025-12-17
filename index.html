@@ -3,29 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>MORGBY.OS | Surveillance</title>
-    <!-- Tailwind for Styling -->
+    <title>MORGBY.OS | Full Tactical Suite</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
-    <!-- React Core -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <!-- Babel to run React in Browser -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @keyframes pulse-red { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .recording-dot { animation: pulse-red 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
+    </style>
 </head>
-<body class="bg-slate-950 overflow-hidden">
+<body class="bg-slate-950 text-slate-100 font-sans select-none overflow-hidden">
     <div id="root"></div>
 
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
-        // Manual Lucide Icon mapping for browser environment
+
         const Icon = ({ name, size = 18, className = "" }) => {
             const iconRef = useRef(null);
             useEffect(() => {
-                if (iconRef.current) {
+                if (window.lucide && iconRef.current) {
                     lucide.createIcons({
-                        attrs: { size, class: className },
+                        attrs: { 'stroke-width': 2, size, class: className },
                         nameAttr: 'data-lucide'
                     });
                 }
@@ -33,237 +36,381 @@
             return <i data-lucide={name} ref={iconRef}></i>;
         };
 
-        const TF_SCRIPT = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0';
-        const COCO_SCRIPT = 'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2';
-        const JSZIP_SCRIPT = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+        const TF_JS = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0';
+        const COCO_SSD = 'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2';
 
-        const loadScript = (src) => {
-            return new Promise((resolve, reject) => {
-                if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-                const script = document.createElement('script');
-                script.src = src;
-                script.onload = resolve;
-                script.onerror = reject;
-                document.body.appendChild(script);
-            });
-        };
-
-        const formatTime = (date) => {
-            return date.toLocaleString('en-US', {
-                month: '2-digit', day: '2-digit', year: '2-digit',
-                hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
-            });
-        };
+        const loadScript = (src) => new Promise((res) => {
+            if (document.querySelector(`script[src="${src}"]`)) return res();
+            const s = document.createElement('script');
+            s.src = src; s.onload = res; document.body.appendChild(s);
+        });
 
         function App() {
-            const [activeTab, setActiveTab] = useState('monitor'); 
+            const [activeTab, setActiveTab] = useState('monitor');
             const [isMonitoring, setIsMonitoring] = useState(false);
             const [isModelLoaded, setIsModelLoaded] = useState(false);
             const [logs, setLogs] = useState([]);
-            const [queue, setQueue] = useState([]); 
-            const [isOnline, setIsOnline] = useState(navigator.onLine);
+            const [queueCount, setQueueCount] = useState(0);
             const [isBlackout, setIsBlackout] = useState(false);
-            const [storageUsed, setStorageUsed] = useState(0); 
+            const [isOnline, setIsOnline] = useState(navigator.onLine);
+            const [isFlashActive, setIsFlashActive] = useState(false);
 
             const [config, setConfig] = useState(() => {
-                const saved = localStorage.getItem('morgby_config');
+                const saved = localStorage.getItem('morgby_v2_cfg');
                 return saved ? JSON.parse(saved) : {
-                    botToken: '', chatId: '', intervalMinutes: 15, mode: 'photo',
-                    flashEnabled: false, flashStartHour: 18, flashEndHour: 6,
-                    detectPerson: true, storageLimitMb: 100,
+                    botToken: '', chatId: '', interval: 15, personOnly: true, useFlash: false
                 };
             });
-
-            useEffect(() => { localStorage.setItem('morgby_config', JSON.stringify(config)); }, [config]);
 
             const videoRef = useRef(null);
             const canvasRef = useRef(null);
             const streamRef = useRef(null);
             const netRef = useRef(null);
-            const intervalRef = useRef(null);
-            const pollRef = useRef(null);
-            const wakeLockRef = useRef(null);
-            const offsetRef = useRef(0);
             const dbRef = useRef(null);
+            const lastOffset = useRef(0);
+
+            useEffect(() => {
+                localStorage.setItem('morgby_v2_cfg', JSON.stringify(config));
+            }, [config]);
 
             const addLog = useCallback((msg, type = 'info') => {
-                const timestamp = new Date().toLocaleTimeString();
-                setLogs(prev => [{ time: timestamp, msg, type }, ...prev].slice(0, 50));
+                const time = new Date().toLocaleTimeString();
+                setLogs(prev => [{ time, msg, type }, ...prev].slice(0, 30));
             }, []);
 
-            const initDB = () => {
-                return new Promise((resolve) => {
-                    const request = indexedDB.open('MorgbyStorage', 1);
-                    request.onupgradeneeded = (e) => {
-                        const db = e.target.result;
-                        if (!db.objectStoreNames.contains('files')) {
-                            db.createObjectStore('files', { keyPath: 'id', autoIncrement: true });
-                        }
-                    };
-                    request.onsuccess = (e) => {
-                        dbRef.current = e.target.result;
-                        updateStorageStats();
-                        resolve();
-                    };
-                });
-            };
-
-            const updateStorageStats = () => {
-                if (!dbRef.current) return;
-                const transaction = dbRef.current.transaction(['files'], 'readonly');
-                const store = transaction.objectStore('files');
-                const request = store.getAll();
-                request.onsuccess = () => {
-                    const items = request.result;
-                    const totalSize = items.reduce((acc, curr) => acc + curr.size, 0);
-                    setStorageUsed(Number((totalSize / (1024 * 1024)).toFixed(2)));
-                    setQueue(items);
+            useEffect(() => {
+                const req = indexedDB.open('MorgbyDB', 1);
+                req.onupgradeneeded = (e) => e.target.result.createObjectStore('queue', { keyPath: 'id', autoIncrement: true });
+                req.onsuccess = (e) => {
+                    dbRef.current = e.target.result;
+                    refreshQueue();
+                    loadAI();
                 };
-            };
+                window.addEventListener('online', () => setIsOnline(true));
+                window.addEventListener('offline', () => setIsOnline(false));
+            }, []);
 
-            const captureAndSave = async (reason) => {
-                if (!videoRef.current) return;
-                const hour = new Date().getHours();
-                const canvas = canvasRef.current;
-                const ctx = canvas.getContext('2d');
-                canvas.width = videoRef.current.videoWidth;
-                canvas.height = videoRef.current.videoHeight;
-                ctx.drawImage(videoRef.current, 0, 0);
-                
-                canvas.toBlob(async (blob) => {
-                    const time = formatTime(new Date());
-                    const transaction = dbRef.current.transaction(['files'], 'readwrite');
-                    transaction.objectStore('files').add({ 
-                        blob, 
-                        caption: `⏰ ${time}\n📝 Reason: ${reason}`, 
-                        timestamp: Date.now(), 
-                        size: blob.size 
-                    });
-                    transaction.oncomplete = () => {
-                        updateStorageStats();
-                        if (isOnline) processQueue();
-                    };
-                }, 'image/jpeg', 0.7);
-            };
-
-            const processQueue = async () => {
-                if (!dbRef.current || queue.length === 0 || !config.botToken) return;
-                for (const item of queue) {
-                    const formData = new FormData();
-                    formData.append('chat_id', config.chatId);
-                    formData.append('photo', item.blob, 'capture.jpg');
-                    try {
-                        const res = await fetch(`https://api.telegram.org/bot${config.botToken}/sendPhoto`, { method: 'POST', body: formData });
-                        if (res.ok) {
-                            const tx = dbRef.current.transaction(['files'], 'readwrite');
-                            tx.objectStore('files').delete(item.id);
-                            tx.oncomplete = updateStorageStats;
-                        }
-                    } catch (e) {}
+            const loadAI = async () => {
+                addLog('Booting AI Engine...');
+                await loadScript(TF_JS);
+                await loadScript(COCO_SSD);
+                if (window.cocoSsd) {
+                    netRef.current = await cocoSsd.load();
+                    setIsModelLoaded(true);
+                    addLog('Vision System Active', 'success');
                 }
             };
 
-            const toggleMonitoring = async () => {
+            const refreshQueue = () => {
+                if (!dbRef.current) return;
+                const tx = dbRef.current.transaction('queue', 'readonly');
+                const req = tx.objectStore('queue').getAll();
+                req.onsuccess = () => setQueueCount(req.result.length);
+            };
+
+            const clearStorage = () => {
+                if (!dbRef.current) return;
+                const tx = dbRef.current.transaction('queue', 'readwrite');
+                tx.objectStore('queue').clear();
+                tx.oncomplete = () => {
+                    refreshQueue();
+                    addLog('Storage Cleared', 'error');
+                };
+            };
+
+            const toggleFlash = async (force) => {
+                const track = streamRef.current?.getVideoTracks()[0];
+                if (!track) return;
+                
+                const capabilities = track.getCapabilities();
+                if (capabilities.torch) {
+                    const newState = force !== undefined ? force : !isFlashActive;
+                    await track.applyConstraints({
+                        advanced: [{ torch: newState }]
+                    });
+                    setIsFlashActive(newState);
+                } else {
+                    addLog('Flash not supported', 'error');
+                }
+            };
+
+            const capture = async (reason = 'Manual') => {
+                if (!videoRef.current || !dbRef.current) return;
+                
+                // Night strobe logic
+                let flashTimedOut = false;
+                if (config.useFlash) {
+                    await toggleFlash(true);
+                    await new Promise(r => setTimeout(r, 500)); // Allow light to stabilize
+                }
+
+                if (config.personOnly && netRef.current) {
+                    const predictions = await netRef.current.detect(videoRef.current);
+                    const hasPerson = predictions.some(p => p.class === 'person');
+                    if (!hasPerson && reason === 'Auto') {
+                        if (config.useFlash) await toggleFlash(false);
+                        return;
+                    }
+                }
+
+                const canvas = canvasRef.current;
+                canvas.width = videoRef.current.videoWidth;
+                canvas.height = videoRef.current.videoHeight;
+                canvas.getContext('2d').drawImage(videoRef.current, 0, 0);
+
+                if (config.useFlash) await toggleFlash(false);
+
+                canvas.toBlob(blob => {
+                    const tx = dbRef.current.transaction('queue', 'readwrite');
+                    tx.objectStore('queue').add({
+                        blob,
+                        caption: `🚨 MORGBY SYSTEM ALERT\nReason: ${reason}\nDevice: ${navigator.platform}\nFlash: ${config.useFlash ? 'ON' : 'OFF'}\nTime: ${new Date().toLocaleString()}`,
+                        timestamp: Date.now()
+                    });
+                    tx.oncomplete = () => {
+                        refreshQueue();
+                        addLog(`Event: ${reason}`, 'success');
+                        sync();
+                    };
+                }, 'image/jpeg', 0.8);
+            };
+
+            const sync = async () => {
+                if (!isOnline || !config.botToken || !dbRef.current) return;
+                const tx = dbRef.current.transaction('queue', 'readonly');
+                const items = await new Promise(r => tx.objectStore('queue').getAll().onsuccess = e => r(e.target.result));
+                
+                for (const item of items) {
+                    const formData = new FormData();
+                    formData.append('chat_id', config.chatId);
+                    formData.append('caption', item.caption);
+                    formData.append('photo', item.blob, 'morgby.jpg');
+
+                    try {
+                        const res = await fetch(`https://api.telegram.org/bot${config.botToken}/sendPhoto`, { method: 'POST', body: formData });
+                        if (res.ok) {
+                            const delTx = dbRef.current.transaction('queue', 'readwrite');
+                            delTx.objectStore('queue').delete(item.id);
+                            delTx.oncomplete = refreshQueue;
+                        } else { break; }
+                    } catch (err) { break; }
+                }
+            };
+
+            const toggleMonitor = async () => {
                 if (isMonitoring) {
                     setIsMonitoring(false);
-                    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-                    clearInterval(intervalRef.current);
+                    streamRef.current?.getTracks().forEach(t => t.stop());
+                    setIsFlashActive(false);
+                    addLog('System Disarmed');
                 } else {
                     try {
-                        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-                        videoRef.current.srcObject = stream;
-                        streamRef.current = stream;
+                        const s = await navigator.mediaDevices.getUserMedia({ 
+                            video: { 
+                                facingMode: 'environment',
+                                width: { ideal: 1280 },
+                                height: { ideal: 720 }
+                            } 
+                        });
+                        videoRef.current.srcObject = s;
+                        streamRef.current = s;
                         setIsMonitoring(true);
                         addLog('System Armed', 'success');
-                        intervalRef.current = setInterval(() => captureAndSave('Scheduled'), config.intervalMinutes * 60000);
-                    } catch (e) { addLog('Camera Denied', 'error'); }
+                        capture('System Initialized');
+                    } catch (e) { 
+                        addLog('Camera Access Denied', 'error'); 
+                    }
                 }
             };
 
             useEffect(() => {
-                initDB().then(() => {
-                    loadScript(TF_SCRIPT);
-                    loadScript(COCO_SCRIPT);
-                    loadScript(JSZIP_SCRIPT).then(() => {
-                        setIsModelLoaded(true);
-                        addLog('AI Engine Ready', 'success');
-                    });
-                });
-            }, []);
+                if (!isMonitoring) return;
+                const timer = setInterval(() => capture('Auto'), config.interval * 60000);
+                const poll = setInterval(async () => {
+                    if (!isOnline || !config.botToken) return;
+                    try {
+                        const r = await fetch(`https://api.telegram.org/bot${config.botToken}/getUpdates?offset=${lastOffset.current + 1}&timeout=0`);
+                        const d = await r.json();
+                        if (d.ok && d.result.length > 0) {
+                            lastOffset.current = d.result[d.result.length - 1].update_id;
+                            d.result.forEach(u => {
+                                const cmd = u.message?.text?.toLowerCase();
+                                if (cmd === '/photo') capture('Remote Command');
+                                if (cmd === '/flash_on') toggleFlash(true);
+                                if (cmd === '/flash_off') toggleFlash(false);
+                                if (cmd === '/status') {
+                                    fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+                                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                                        body: JSON.stringify({ chat_id: config.chatId, text: `🛡️ MORGBY STATUS\n\nState: ACTIVE\nOffline Queue: ${queueCount}\nAI Filtering: ${config.personOnly ? 'ON' : 'OFF'}\nFlash Strobe: ${config.useFlash ? 'ENABLED' : 'DISABLED'}` })
+                                    });
+                                }
+                            });
+                        }
+                    } catch(e) {}
+                }, 4000);
+                return () => { clearInterval(timer); clearInterval(poll); };
+            }, [isMonitoring, isOnline, config, queueCount]);
 
             return (
-                <div className="flex flex-col h-screen text-slate-100 font-sans">
-                    {isBlackout && <div onClick={() => setIsBlackout(false)} className="absolute inset-0 z-50 bg-black cursor-pointer" />}
+                <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-950 shadow-2xl relative border-x border-slate-900">
+                    {isBlackout && (
+                        <div onClick={() => setIsBlackout(false)} className="absolute inset-0 bg-black z-[100] cursor-none flex items-center justify-center">
+                            <div className="w-1 h-1 bg-white/5 rounded-full" />
+                        </div>
+                    )}
                     
-                    <header className="bg-slate-900 p-4 flex justify-between items-center border-b border-slate-800">
-                        <h1 className="font-bold tracking-tighter uppercase flex items-center gap-2">
-                            <div className={`w-2 h-2 rounded-full ${isMonitoring ? 'bg-red-500 animate-pulse' : 'bg-slate-600'}`}></div>
-                            MORGBY<span className="text-red-500">.</span>OS
-                        </h1>
-                        <div className="flex gap-4">
-                            <button onClick={() => setIsBlackout(true)}><Icon name="eye-off" className="text-slate-400" /></button>
-                            {isOnline ? <Icon name="wifi" className="text-green-500" /> : <Icon name="wifi-off" className="text-red-500" />}
+                    <header className="p-4 border-b border-slate-900 flex justify-between items-center bg-slate-950/80 backdrop-blur-md sticky top-0 z-10">
+                        <div className="flex items-center gap-2">
+                            <div className={`w-2 h-2 rounded-full ${isMonitoring ? 'bg-red-500 recording-dot' : 'bg-slate-700'}`} />
+                            <h1 className="font-black tracking-tighter text-lg uppercase">Morgby<span className="text-red-600">.</span>OS</h1>
+                        </div>
+                        <div className="flex gap-4 items-center">
+                            <button onClick={() => toggleFlash()} className={`transition-colors ${isFlashActive ? 'text-yellow-400' : 'text-slate-500'}`} title="Toggle Light">
+                                <Icon name="flashlight" size={18} />
+                            </button>
+                            <button onClick={() => setIsBlackout(true)} className="text-slate-500 hover:text-white transition-colors" title="Stealth Mode">
+                                <Icon name="eye-off" size={18} />
+                            </button>
+                            <Icon name="wifi" className={isOnline ? "text-green-500" : "text-red-600"} size={18} />
                         </div>
                     </header>
 
-                    <main className="flex-1 p-4 overflow-y-auto max-w-lg mx-auto w-full space-y-4">
-                        <div className="flex gap-4 text-[10px] font-bold uppercase tracking-widest border-b border-slate-800 pb-2">
-                            <button onClick={() => setActiveTab('monitor')} className={activeTab === 'monitor' ? 'text-blue-500 border-b border-blue-500' : 'text-slate-500'}>Monitor</button>
-                            <button onClick={() => setActiveTab('config')} className={activeTab === 'config' ? 'text-blue-500 border-b border-blue-500' : 'text-slate-500'}>Config</button>
-                            <button onClick={() => setActiveTab('help')} className="ml-auto text-slate-500">Guide</button>
+                    <main className="flex-1 overflow-y-auto p-4 space-y-6">
+                        <div className="flex gap-6 border-b border-slate-900 text-[10px] font-bold uppercase tracking-widest pb-2 overflow-x-auto whitespace-nowrap scrollbar-hide">
+                            {['monitor', 'config', 'storage', 'guide', 'logs'].map(t => (
+                                <button key={t} onClick={() => setActiveTab(t)} className={activeTab === t ? "text-blue-500 border-b-2 border-blue-500 pb-2 -mb-2.5 transition-all" : "text-slate-600 pb-2 -mb-2.5 transition-all"}>{t}</button>
+                            ))}
                         </div>
 
                         {activeTab === 'monitor' && (
-                            <div className="space-y-4">
-                                <div className="aspect-video bg-black rounded-xl border border-slate-800 relative overflow-hidden">
-                                    <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover opacity-60" />
+                            <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-500">
+                                <div className="aspect-video bg-black rounded-2xl border border-slate-900 overflow-hidden relative shadow-inner">
+                                    <video ref={videoRef} autoPlay playsInline muted className={`w-full h-full object-cover transition-opacity duration-1000 ${isMonitoring ? 'opacity-80' : 'opacity-10'}`} />
                                     <canvas ref={canvasRef} className="hidden" />
+                                    {isMonitoring && <div className="absolute top-4 right-4 flex items-center gap-2 bg-black/50 px-2 py-1 rounded text-[10px] font-bold text-red-500"><div className="w-1.5 h-1.5 bg-red-500 rounded-full recording-dot" /> LIVE</div>}
                                 </div>
-                                <button onClick={toggleMonitoring} className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-3 ${isMonitoring ? 'bg-red-600' : 'bg-blue-600'}`}>
-                                    <Icon name={isMonitoring ? "square" : "play"} />
-                                    {isMonitoring ? 'DEACTIVATE' : 'ARM SYSTEM'}
+                                
+                                <button onClick={toggleMonitor} className={`w-full py-5 rounded-2xl font-black text-xs tracking-[0.2em] flex items-center justify-center gap-3 transition-all transform active:scale-95 ${isMonitoring ? 'bg-red-600/10 text-red-500 border border-red-900/50 hover:bg-red-600/20' : 'bg-blue-600 text-white shadow-xl shadow-blue-900/40 hover:bg-blue-500'}`}>
+                                    <Icon name={isMonitoring ? "power" : "shield-check"} />
+                                    {isMonitoring ? 'DISARM SYSTEM' : 'INITIALIZE PROTOCOL'}
                                 </button>
+
                                 <div className="grid grid-cols-2 gap-4">
-                                    <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
-                                        <p className="text-[10px] text-slate-500 font-bold uppercase">Queue</p>
-                                        <p className="text-xl font-bold">{queue.length}</p>
+                                    <div className="bg-slate-900/30 p-4 rounded-2xl border border-slate-900/50">
+                                        <p className="text-[10px] text-slate-500 font-bold uppercase mb-1 text-center">In Queue</p>
+                                        <p className="text-2xl font-black tracking-tighter text-center">{queueCount}</p>
                                     </div>
-                                    <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
-                                        <p className="text-[10px] text-slate-500 font-bold uppercase">AI Status</p>
-                                        <p className="text-xl font-bold text-green-500">{isModelLoaded ? 'READY' : '...'}</p>
+                                    <div className="bg-slate-900/30 p-4 rounded-2xl border border-slate-900/50">
+                                        <p className="text-[10px] text-slate-500 font-bold uppercase mb-1 text-center">AI Vision</p>
+                                        <p className={`text-2xl font-black tracking-tighter text-center ${isModelLoaded ? 'text-blue-500' : 'text-slate-700'}`}>{isModelLoaded ? 'READY' : '...'}</p>
                                     </div>
                                 </div>
                             </div>
                         )}
 
                         {activeTab === 'config' && (
-                            <div className="space-y-4 animate-in slide-in-from-right">
-                                <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-slate-800">
-                                    <p className="text-[10px] font-bold text-slate-500 uppercase">Credentials</p>
-                                    <input type="password" placeholder="Bot Token" className="w-full bg-slate-950 border border-slate-800 p-2 rounded text-sm outline-none" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} />
-                                    <input type="text" placeholder="Chat ID" className="w-full bg-slate-950 border border-slate-800 p-2 rounded text-sm outline-none" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} />
+                            <div className="space-y-4 animate-in fade-in duration-300">
+                                <div className="bg-slate-900/30 p-5 rounded-2xl border border-slate-900/50 space-y-4">
+                                    <h3 className="text-[10px] font-black text-blue-500 uppercase tracking-widest">Target Params</h3>
+                                    <div>
+                                        <label className="text-[10px] text-slate-600 font-bold uppercase block mb-2">Bot Token</label>
+                                        <input type="password" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-sm focus:border-blue-500 outline-none transition-all" />
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] text-slate-600 font-bold uppercase block mb-2">Chat ID</label>
+                                        <input type="text" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} className="w-full bg-slate-950 border border-slate-800 p-3 rounded-xl text-sm focus:border-blue-500 outline-none transition-all" />
+                                    </div>
                                 </div>
-                                <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-slate-800 text-sm">
-                                    <p className="text-[10px] font-bold text-slate-500 uppercase">Rules</p>
-                                    <div className="flex justify-between items-center"><label>Interval (Min)</label><input type="number" className="w-16 bg-slate-950 border border-slate-800 p-1 text-right" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value)})} /></div>
-                                    <div className="flex justify-between items-center"><label>Night Flash</label><input type="checkbox" checked={config.flashEnabled} onChange={e => setConfig({...config, flashEnabled: e.target.checked})} /></div>
+                                
+                                <div className="bg-slate-900/30 p-5 rounded-2xl border border-slate-900/50 space-y-5 text-sm">
+                                    <h3 className="text-[10px] font-black text-blue-500 uppercase tracking-widest">Operational Logic</h3>
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-slate-400">Night Strobe (Auto-Flash)</span>
+                                        <label className="relative inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" checked={config.useFlash} onChange={e => setConfig({...config, useFlash: e.target.checked})} className="sr-only peer" />
+                                            <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                        </label>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-slate-400">AI Human Filter</span>
+                                        <label className="relative inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" checked={config.personOnly} onChange={e => setConfig({...config, personOnly: e.target.checked})} className="sr-only peer" />
+                                            <div className="w-11 h-6 bg-slate-800 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
                         )}
 
-                        {activeTab === 'help' && (
-                            <div className="space-y-4 text-xs text-slate-400 leading-relaxed bg-slate-900 p-4 rounded-xl border border-slate-800">
-                                <p className="font-bold text-slate-100 uppercase">Setup Guide</p>
-                                <p>1. Get a Bot Token from @BotFather on Telegram.</p>
-                                <p>2. Get your Chat ID from @userinfobot.</p>
-                                <p>3. Enter them in Config and press ARM.</p>
-                                <p><b>Important:</b> Keep this tab open. Plugging your phone into a charger is recommended.</p>
+                        {activeTab === 'storage' && (
+                            <div className="space-y-4 animate-in fade-in duration-300">
+                                <div className="bg-slate-900/30 p-5 rounded-2xl border border-slate-900/50">
+                                    <div className="flex justify-between items-center mb-6">
+                                        <h3 className="text-[10px] font-black text-blue-500 uppercase tracking-widest">Database Health</h3>
+                                        <Icon name="database" size={14} className="text-slate-700" />
+                                    </div>
+                                    <div className="space-y-4">
+                                        <div className="flex justify-between items-end">
+                                            <div>
+                                                <p className="text-[10px] text-slate-600 font-bold uppercase mb-1">Items Cached</p>
+                                                <p className="text-4xl font-black tracking-tighter">{queueCount}</p>
+                                            </div>
+                                            <button onClick={clearStorage} className="bg-red-600/10 text-red-500 border border-red-900/50 px-4 py-2 rounded-xl text-[10px] font-bold uppercase hover:bg-red-600/20 active:scale-95 transition-all">Wipe Database</button>
+                                        </div>
+                                        <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                                            <div className="h-full bg-blue-600 transition-all duration-500" style={{ width: `${Math.min((queueCount / 200) * 100, 100)}%` }} />
+                                        </div>
+                                        <p className="text-[10px] text-slate-700 leading-relaxed italic">The database uses IndexedDB for persistent storage. Photos stay in the queue until the device establishes a connection to the Telegram API servers.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'guide' && (
+                            <div className="space-y-6 animate-in fade-in duration-300">
+                                <div className="bg-blue-600/10 border border-blue-900/50 p-5 rounded-2xl">
+                                    <h3 className="text-blue-500 font-black uppercase text-[10px] tracking-widest mb-3">Remote Commands</h3>
+                                    <ul className="space-y-4 text-xs font-mono">
+                                        <li className="flex gap-3">/photo <span className="text-slate-500">- Immediate snap</span></li>
+                                        <li className="flex gap-3">/flash_on <span className="text-slate-500">- Force light on</span></li>
+                                        <li className="flex gap-3">/flash_off <span className="text-slate-500">- Kill light</span></li>
+                                        <li className="flex gap-3">/status <span className="text-slate-500">- Stats report</span></li>
+                                    </ul>
+                                </div>
+                                <div className="space-y-3">
+                                    <h3 className="text-slate-500 font-black uppercase text-[10px] tracking-widest px-1">Tactical Setup</h3>
+                                    {[
+                                        { s: '01', t: 'BotFather', d: 'Get token from @BotFather' },
+                                        { s: '02', t: 'ID Retrieval', d: 'Get ID from @userinfobot' },
+                                        { s: '03', t: 'Configuration', d: 'Enable "Night Strobe" for pitch black rooms.' },
+                                        { s: '04', t: 'Blackout', d: 'Use Stealth Mode to mimic a powered-off screen.' }
+                                    ].map(item => (
+                                        <div key={item.s} className="flex gap-4 p-4 bg-slate-900/20 border border-slate-900 rounded-xl">
+                                            <span className="text-blue-600 font-black italic">{item.s}</span>
+                                            <div>
+                                                <p className="text-[10px] font-black uppercase text-slate-200">{item.t}</p>
+                                                <p className="text-[11px] text-slate-500 mt-1">{item.d}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'logs' && (
+                            <div className="bg-slate-950 border border-slate-900 rounded-2xl p-4 font-mono text-[10px] min-h-[300px] max-h-[400px] overflow-y-auto space-y-2 shadow-inner">
+                                {logs.map((l, i) => (
+                                    <div key={i} className={`flex gap-3 border-b border-slate-900/50 pb-1.5 ${l.type === 'error' ? 'text-red-400' : 'text-slate-500'}`}>
+                                        <span className="opacity-30">[{l.time}]</span>
+                                        <span className={l.type === 'success' ? 'text-green-500 font-bold' : ''}>{l.msg}</span>
+                                    </div>
+                                ))}
                             </div>
                         )}
                     </main>
 
-                    <footer className="p-3 bg-slate-900 text-center text-[10px] text-slate-600 uppercase border-t border-slate-800">
-                        {storageUsed}MB Locally Cached
+                    <footer className="p-4 bg-slate-900/20 text-[10px] text-slate-600 uppercase tracking-widest text-center border-t border-slate-900/50">
+                        Storage: IndexedDB | Flash: {isFlashActive ? 'ACTIVE' : 'READY'}
                     </footer>
                 </div>
             );
