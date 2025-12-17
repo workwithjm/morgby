@@ -2,23 +2,275 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Morgby.OS</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>MORGBY.OS | Surveillance</title>
+    <!-- Tailwind for Styling -->
     <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-slate-950">
-    <div id="root"></div>
-    
-    <!-- Load React and Babel for single-file execution -->
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- React Core -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel to run React in Browser -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-950 overflow-hidden">
+    <div id="root"></div>
 
     <script type="text/babel">
-        // Import the App component code here
-        // For simplicity in a single-file deployment, 
-        // you can paste the entire code from App.jsx here 
-        // or ensure your Vercel build settings point to a bundler.
+        const { useState, useEffect, useRef, useCallback } = React;
+        // Manual Lucide Icon mapping for browser environment
+        const Icon = ({ name, size = 18, className = "" }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current) {
+                    lucide.createIcons({
+                        attrs: { size, class: className },
+                        nameAttr: 'data-lucide'
+                    });
+                }
+            }, [name, size, className]);
+            return <i data-lucide={name} ref={iconRef}></i>;
+        };
+
+        const TF_SCRIPT = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0';
+        const COCO_SCRIPT = 'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2';
+        const JSZIP_SCRIPT = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+
+        const loadScript = (src) => {
+            return new Promise((resolve, reject) => {
+                if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+                const script = document.createElement('script');
+                script.src = src;
+                script.onload = resolve;
+                script.onerror = reject;
+                document.body.appendChild(script);
+            });
+        };
+
+        const formatTime = (date) => {
+            return date.toLocaleString('en-US', {
+                month: '2-digit', day: '2-digit', year: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+            });
+        };
+
+        function App() {
+            const [activeTab, setActiveTab] = useState('monitor'); 
+            const [isMonitoring, setIsMonitoring] = useState(false);
+            const [isModelLoaded, setIsModelLoaded] = useState(false);
+            const [logs, setLogs] = useState([]);
+            const [queue, setQueue] = useState([]); 
+            const [isOnline, setIsOnline] = useState(navigator.onLine);
+            const [isBlackout, setIsBlackout] = useState(false);
+            const [storageUsed, setStorageUsed] = useState(0); 
+
+            const [config, setConfig] = useState(() => {
+                const saved = localStorage.getItem('morgby_config');
+                return saved ? JSON.parse(saved) : {
+                    botToken: '', chatId: '', intervalMinutes: 15, mode: 'photo',
+                    flashEnabled: false, flashStartHour: 18, flashEndHour: 6,
+                    detectPerson: true, storageLimitMb: 100,
+                };
+            });
+
+            useEffect(() => { localStorage.setItem('morgby_config', JSON.stringify(config)); }, [config]);
+
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null);
+            const streamRef = useRef(null);
+            const netRef = useRef(null);
+            const intervalRef = useRef(null);
+            const pollRef = useRef(null);
+            const wakeLockRef = useRef(null);
+            const offsetRef = useRef(0);
+            const dbRef = useRef(null);
+
+            const addLog = useCallback((msg, type = 'info') => {
+                const timestamp = new Date().toLocaleTimeString();
+                setLogs(prev => [{ time: timestamp, msg, type }, ...prev].slice(0, 50));
+            }, []);
+
+            const initDB = () => {
+                return new Promise((resolve) => {
+                    const request = indexedDB.open('MorgbyStorage', 1);
+                    request.onupgradeneeded = (e) => {
+                        const db = e.target.result;
+                        if (!db.objectStoreNames.contains('files')) {
+                            db.createObjectStore('files', { keyPath: 'id', autoIncrement: true });
+                        }
+                    };
+                    request.onsuccess = (e) => {
+                        dbRef.current = e.target.result;
+                        updateStorageStats();
+                        resolve();
+                    };
+                });
+            };
+
+            const updateStorageStats = () => {
+                if (!dbRef.current) return;
+                const transaction = dbRef.current.transaction(['files'], 'readonly');
+                const store = transaction.objectStore('files');
+                const request = store.getAll();
+                request.onsuccess = () => {
+                    const items = request.result;
+                    const totalSize = items.reduce((acc, curr) => acc + curr.size, 0);
+                    setStorageUsed(Number((totalSize / (1024 * 1024)).toFixed(2)));
+                    setQueue(items);
+                };
+            };
+
+            const captureAndSave = async (reason) => {
+                if (!videoRef.current) return;
+                const hour = new Date().getHours();
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                canvas.width = videoRef.current.videoWidth;
+                canvas.height = videoRef.current.videoHeight;
+                ctx.drawImage(videoRef.current, 0, 0);
+                
+                canvas.toBlob(async (blob) => {
+                    const time = formatTime(new Date());
+                    const transaction = dbRef.current.transaction(['files'], 'readwrite');
+                    transaction.objectStore('files').add({ 
+                        blob, 
+                        caption: `⏰ ${time}\n📝 Reason: ${reason}`, 
+                        timestamp: Date.now(), 
+                        size: blob.size 
+                    });
+                    transaction.oncomplete = () => {
+                        updateStorageStats();
+                        if (isOnline) processQueue();
+                    };
+                }, 'image/jpeg', 0.7);
+            };
+
+            const processQueue = async () => {
+                if (!dbRef.current || queue.length === 0 || !config.botToken) return;
+                for (const item of queue) {
+                    const formData = new FormData();
+                    formData.append('chat_id', config.chatId);
+                    formData.append('photo', item.blob, 'capture.jpg');
+                    try {
+                        const res = await fetch(`https://api.telegram.org/bot${config.botToken}/sendPhoto`, { method: 'POST', body: formData });
+                        if (res.ok) {
+                            const tx = dbRef.current.transaction(['files'], 'readwrite');
+                            tx.objectStore('files').delete(item.id);
+                            tx.oncomplete = updateStorageStats;
+                        }
+                    } catch (e) {}
+                }
+            };
+
+            const toggleMonitoring = async () => {
+                if (isMonitoring) {
+                    setIsMonitoring(false);
+                    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+                    clearInterval(intervalRef.current);
+                } else {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                        videoRef.current.srcObject = stream;
+                        streamRef.current = stream;
+                        setIsMonitoring(true);
+                        addLog('System Armed', 'success');
+                        intervalRef.current = setInterval(() => captureAndSave('Scheduled'), config.intervalMinutes * 60000);
+                    } catch (e) { addLog('Camera Denied', 'error'); }
+                }
+            };
+
+            useEffect(() => {
+                initDB().then(() => {
+                    loadScript(TF_SCRIPT);
+                    loadScript(COCO_SCRIPT);
+                    loadScript(JSZIP_SCRIPT).then(() => {
+                        setIsModelLoaded(true);
+                        addLog('AI Engine Ready', 'success');
+                    });
+                });
+            }, []);
+
+            return (
+                <div className="flex flex-col h-screen text-slate-100 font-sans">
+                    {isBlackout && <div onClick={() => setIsBlackout(false)} className="absolute inset-0 z-50 bg-black cursor-pointer" />}
+                    
+                    <header className="bg-slate-900 p-4 flex justify-between items-center border-b border-slate-800">
+                        <h1 className="font-bold tracking-tighter uppercase flex items-center gap-2">
+                            <div className={`w-2 h-2 rounded-full ${isMonitoring ? 'bg-red-500 animate-pulse' : 'bg-slate-600'}`}></div>
+                            MORGBY<span className="text-red-500">.</span>OS
+                        </h1>
+                        <div className="flex gap-4">
+                            <button onClick={() => setIsBlackout(true)}><Icon name="eye-off" className="text-slate-400" /></button>
+                            {isOnline ? <Icon name="wifi" className="text-green-500" /> : <Icon name="wifi-off" className="text-red-500" />}
+                        </div>
+                    </header>
+
+                    <main className="flex-1 p-4 overflow-y-auto max-w-lg mx-auto w-full space-y-4">
+                        <div className="flex gap-4 text-[10px] font-bold uppercase tracking-widest border-b border-slate-800 pb-2">
+                            <button onClick={() => setActiveTab('monitor')} className={activeTab === 'monitor' ? 'text-blue-500 border-b border-blue-500' : 'text-slate-500'}>Monitor</button>
+                            <button onClick={() => setActiveTab('config')} className={activeTab === 'config' ? 'text-blue-500 border-b border-blue-500' : 'text-slate-500'}>Config</button>
+                            <button onClick={() => setActiveTab('help')} className="ml-auto text-slate-500">Guide</button>
+                        </div>
+
+                        {activeTab === 'monitor' && (
+                            <div className="space-y-4">
+                                <div className="aspect-video bg-black rounded-xl border border-slate-800 relative overflow-hidden">
+                                    <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover opacity-60" />
+                                    <canvas ref={canvasRef} className="hidden" />
+                                </div>
+                                <button onClick={toggleMonitoring} className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-3 ${isMonitoring ? 'bg-red-600' : 'bg-blue-600'}`}>
+                                    <Icon name={isMonitoring ? "square" : "play"} />
+                                    {isMonitoring ? 'DEACTIVATE' : 'ARM SYSTEM'}
+                                </button>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
+                                        <p className="text-[10px] text-slate-500 font-bold uppercase">Queue</p>
+                                        <p className="text-xl font-bold">{queue.length}</p>
+                                    </div>
+                                    <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
+                                        <p className="text-[10px] text-slate-500 font-bold uppercase">AI Status</p>
+                                        <p className="text-xl font-bold text-green-500">{isModelLoaded ? 'READY' : '...'}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'config' && (
+                            <div className="space-y-4 animate-in slide-in-from-right">
+                                <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-slate-800">
+                                    <p className="text-[10px] font-bold text-slate-500 uppercase">Credentials</p>
+                                    <input type="password" placeholder="Bot Token" className="w-full bg-slate-950 border border-slate-800 p-2 rounded text-sm outline-none" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} />
+                                    <input type="text" placeholder="Chat ID" className="w-full bg-slate-950 border border-slate-800 p-2 rounded text-sm outline-none" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} />
+                                </div>
+                                <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-slate-800 text-sm">
+                                    <p className="text-[10px] font-bold text-slate-500 uppercase">Rules</p>
+                                    <div className="flex justify-between items-center"><label>Interval (Min)</label><input type="number" className="w-16 bg-slate-950 border border-slate-800 p-1 text-right" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value)})} /></div>
+                                    <div className="flex justify-between items-center"><label>Night Flash</label><input type="checkbox" checked={config.flashEnabled} onChange={e => setConfig({...config, flashEnabled: e.target.checked})} /></div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'help' && (
+                            <div className="space-y-4 text-xs text-slate-400 leading-relaxed bg-slate-900 p-4 rounded-xl border border-slate-800">
+                                <p className="font-bold text-slate-100 uppercase">Setup Guide</p>
+                                <p>1. Get a Bot Token from @BotFather on Telegram.</p>
+                                <p>2. Get your Chat ID from @userinfobot.</p>
+                                <p>3. Enter them in Config and press ARM.</p>
+                                <p><b>Important:</b> Keep this tab open. Plugging your phone into a charger is recommended.</p>
+                            </div>
+                        )}
+                    </main>
+
+                    <footer className="p-3 bg-slate-900 text-center text-[10px] text-slate-600 uppercase border-t border-slate-800">
+                        {storageUsed}MB Locally Cached
+                    </footer>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
     </script>
 </body>
 </html>
