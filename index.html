@@ -3,7 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>MORGBY.OS | Tactical Suite</title>
+    
+    <!-- PWA Manifest (Inline) -->
+    <link rel="manifest" href='data:application/json,{"name":"Morgby Tactical","short_name":"Morgby","start_url":".","display":"standalone","background_color":"#020617","theme_color":"#020617"}'>
     
     <!-- Tailwind for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -20,8 +25,6 @@
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
-        .animate-pulse-slow { animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
         
         /* Tactical list styling for manual */
         .manual-section h2 { color: #3b82f6; font-size: 0.75rem; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 0.5rem; border-left: 2px solid #3b82f6; padding-left: 0.5rem; }
@@ -33,10 +36,39 @@
 <body>
     <div id="root"></div>
 
+    <!-- Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            const swCode = `
+                const CACHE_NAME = 'morgby-v1';
+                const ASSETS = [
+                    '${window.location.origin}${window.location.pathname}',
+                    'https://cdn.tailwindcss.com',
+                    'https://unpkg.com/react@18/umd/react.production.min.js',
+                    'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
+                    'https://unpkg.com/@babel/standalone/babel.min.js',
+                    'https://unpkg.com/lucide@latest',
+                    'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0',
+                    'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2'
+                ];
+
+                self.addEventListener('install', (e) => {
+                    e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
+                });
+
+                self.addEventListener('fetch', (e) => {
+                    e.respondWith(caches.match(e.request).then(res => res || fetch(e.request)));
+                });
+            `;
+            const swUrl = 'data:application/javascript;base64,' + btoa(swCode);
+            navigator.serviceWorker.register(swUrl).catch(err => {
+                console.warn('ServiceWorker registration failed:', err);
+            });
+        }
+    </script>
+
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
-
-        // --- CONSTANTS ---
         const TF_SCRIPT = 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0';
         const COCO_SCRIPT = 'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2';
 
@@ -65,12 +97,14 @@
             const [isBlackout, setIsBlackout] = useState(false);
             const [storageUsed, setStorageUsed] = useState(0);
             const [isTestingApi, setIsTestingApi] = useState(false);
-            
-            const [config, setConfig] = useState({
-                botToken: '',
-                chatId: '',
-                intervalMinutes: 15,
-                detectPerson: true,
+            const [config, setConfig] = useState(() => {
+                const saved = localStorage.getItem('morgby_cfg');
+                return saved ? JSON.parse(saved) : {
+                    botToken: '',
+                    chatId: '',
+                    intervalMinutes: 15,
+                    detectPerson: true,
+                };
             });
 
             const videoRef = useRef(null);
@@ -82,6 +116,10 @@
             const offsetRef = useRef(0);
             const dbRef = useRef(null);
             const isProcessingCommand = useRef(false);
+
+            useEffect(() => {
+                localStorage.setItem('morgby_cfg', JSON.stringify(config));
+            }, [config]);
 
             const addLog = useCallback((msg, type = 'info') => {
                 const timestamp = new Date().toLocaleTimeString();
@@ -120,15 +158,15 @@
             const loadAI = async () => {
                 try {
                     addLog('Loading AI vision...', 'info');
-                    const tf = document.createElement('script'); tf.src = TF_SCRIPT; document.head.appendChild(tf);
-                    tf.onload = () => {
-                        const coco = document.createElement('script'); coco.src = COCO_SCRIPT; document.head.appendChild(coco);
-                        coco.onload = async () => {
-                            netRef.current = await window.cocoSsd.load();
-                            setIsModelLoaded(true);
-                            addLog('AI Engine Online', 'success');
-                        };
-                    };
+                    const loadScript = (src) => new Promise((res, rej) => {
+                        const s = document.createElement('script'); s.src = src;
+                        s.onload = res; s.onerror = rej; document.head.appendChild(s);
+                    });
+                    await loadScript(TF_SCRIPT);
+                    await loadScript(COCO_SCRIPT);
+                    netRef.current = await window.cocoSsd.load();
+                    setIsModelLoaded(true);
+                    addLog('AI Engine Online', 'success');
                 } catch (err) { addLog('AI Init Error', 'error'); }
             };
 
@@ -151,10 +189,7 @@
             };
 
             const capture = useCallback(async (reason) => {
-                if (!videoRef.current || videoRef.current.readyState < 2) {
-                    addLog('Capture failed: Camera not ready', 'error');
-                    return;
-                }
+                if (!videoRef.current || videoRef.current.readyState < 2) return;
                 
                 let detected = false;
                 if (config.detectPerson && netRef.current) {
@@ -227,13 +262,9 @@
                         for (const u of data.result) {
                             offsetRef.current = Math.max(offsetRef.current, u.update_id);
                             const cmd = u.message?.text?.toLowerCase();
-                            if (!cmd) continue;
-                            if (cmd === '/photo') {
-                                addLog('Remote Request: /photo', 'info');
-                                await capture('Remote Request');
-                            } else if (cmd === '/status') {
-                                addLog('Remote Request: /status', 'info');
-                                const msg = `MORGBY STATUS:\n📡 Network: ONLINE\n📂 Storage: ${storageUsed}MB\n⏳ Queue: ${queueCount}\n👁 System Armed: ${isMonitoring}`;
+                            if (cmd === '/photo') await capture('Remote Request');
+                            if (cmd === '/status') {
+                                const msg = `MORGBY STATUS:\n📡 Network: ONLINE\n📂 Storage: ${storageUsed}MB\n⏳ Queue: ${queueCount}\n👁 Armed: ${isMonitoring}`;
                                 await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
@@ -248,7 +279,7 @@
             const testConnection = async () => {
                 if (!config.botToken || !config.chatId) return addLog('Credentials missing', 'error');
                 setIsTestingApi(true);
-                addLog('Testing Telegram Link...', 'info');
+                addLog('Testing Link...', 'info');
                 try {
                     const res = await fetch(`https://api.telegram.org/bot${config.botToken}/getMe`);
                     const data = await res.json();
@@ -287,19 +318,13 @@
                 const down = () => setIsOnline(false);
                 window.addEventListener('online', up);
                 window.addEventListener('offline', down);
-                const backgroundPulse = setInterval(() => { pollUpdates(); uploadNext(); }, 4000);
+                const pulse = setInterval(() => { pollUpdates(); uploadNext(); }, 5000);
                 return () => {
                     window.removeEventListener('online', up);
                     window.removeEventListener('offline', down);
-                    clearInterval(backgroundPulse);
+                    clearInterval(pulse);
                 };
             }, [pollUpdates, uploadNext]);
-
-            useEffect(() => {
-                if (activeTab === 'monitor' && streamRef.current && videoRef.current) {
-                    videoRef.current.srcObject = streamRef.current;
-                }
-            }, [activeTab]);
 
             return (
                 <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-mono">
@@ -313,7 +338,6 @@
                             MORGBY.OS
                         </h1>
                         <div className="flex gap-4 items-center">
-                            <button onClick={() => setIsBlackout(true)} className="text-slate-500 hover:text-white"><Icon name="EyeOff" size={16} /></button>
                             <div className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 border border-white/5">
                                 {isOnline ? <span className="text-green-500">ONLINE</span> : <span className="text-red-500">OFFLINE</span>}
                             </div>
@@ -334,56 +358,46 @@
 
                         {activeTab === 'monitor' && (
                             <div className="space-y-4">
-                                <div className="absolute top-8 left-8 flex gap-2 pointer-events-none">
-                                    <div className="bg-blue-600/80 text-[8px] px-1.5 py-0.5 rounded font-bold backdrop-blur-sm">{queueCount} QUEUED</div>
-                                    <div className="bg-slate-800/80 text-[8px] px-1.5 py-0.5 rounded font-bold backdrop-blur-sm">{storageUsed} MB</div>
+                                <div className="space-y-2">
+                                    <button onClick={toggleMonitor} className={`w-full py-4 rounded-xl font-black text-sm tracking-widest transition-all ${isMonitoring ? 'bg-red-600' : 'bg-blue-600'}`}>
+                                        {isMonitoring ? 'DISARM SYSTEM' : 'ARM TACTICAL SUITE'}
+                                    </button>
+                                    <button onClick={() => setIsBlackout(true)} className="w-full py-3 rounded-xl font-black text-xs tracking-widest bg-slate-900 border border-white/10 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center gap-2">
+                                        <Icon name="EyeOff" size={14} /> ENTER BLACKOUT MODE
+                                    </button>
                                 </div>
-                                <button onClick={toggleMonitor} className={`w-full py-4 rounded-xl font-black text-sm tracking-widest transition-all ${isMonitoring ? 'bg-red-600 shadow-lg shadow-red-900/20' : 'bg-blue-600 shadow-lg shadow-blue-900/20'}`}>
-                                    {isMonitoring ? 'DISARM SYSTEM' : 'ARM TACTICAL SUITE'}
-                                </button>
                                 <div className="grid grid-cols-2 gap-2">
+                                    <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5">
+                                        <div className="text-[8px] text-slate-500 uppercase font-black">Storage</div>
+                                        <div className="text-xs font-bold mt-1">{storageUsed} MB ({queueCount} Files)</div>
+                                    </div>
                                     <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5">
                                         <div className="text-[8px] text-slate-500 uppercase font-black">AI Status</div>
                                         <div className={`text-xs font-bold mt-1 ${isModelLoaded ? 'text-green-500' : 'text-yellow-500 animate-pulse'}`}>
-                                            {isModelLoaded ? 'ENGINE READY' : 'LOADING...'}
+                                            {isModelLoaded ? 'READY' : 'LOADING...'}
                                         </div>
-                                    </div>
-                                    <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5">
-                                        <div className="text-[8px] text-slate-500 uppercase font-black">Last Sync</div>
-                                        <div className="text-xs font-bold mt-1 text-slate-300">{lastCaptureTime ? lastCaptureTime.toLocaleTimeString() : '--:--'}</div>
                                     </div>
                                 </div>
                             </div>
                         )}
 
                         {activeTab === 'config' && (
-                            <div className="space-y-4 animate-in fade-in duration-300">
+                            <div className="space-y-4">
                                 <div className="bg-slate-900 p-4 rounded-xl space-y-4 border border-white/5">
-                                    <div className="flex justify-between items-center border-b border-white/5 pb-2">
-                                        <span className="text-[10px] font-black uppercase text-slate-500">Bot Link</span>
-                                        <button onClick={testConnection} disabled={isTestingApi} className="text-[10px] bg-blue-600 px-2 py-1 rounded font-bold disabled:opacity-50">
-                                            {isTestingApi ? 'PINGING...' : 'TEST'}
-                                        </button>
-                                    </div>
-                                    <input type="password" placeholder="Bot Token" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs focus:border-blue-500 outline-none" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} />
-                                    <input type="text" placeholder="Chat ID" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs focus:border-blue-500 outline-none" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} />
+                                    <input type="password" placeholder="Bot Token" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs outline-none" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} />
+                                    <input type="text" placeholder="Chat ID" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs outline-none" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} />
+                                    <button onClick={testConnection} disabled={isTestingApi} className="w-full py-2 bg-blue-600 rounded text-[10px] font-bold">TEST LINK</button>
                                 </div>
-                                <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-white/5">
-                                    <div className="flex justify-between text-[11px]">
-                                        <span>Interval (Min)</span>
-                                        <input type="number" className="w-12 bg-black text-right outline-none" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value) || 1})} />
-                                    </div>
-                                    <div className="flex justify-between text-[11px]">
-                                        <span>AI Human Filter</span>
-                                        <input type="checkbox" checked={config.detectPerson} onChange={e => setConfig({...config, detectPerson: e.target.checked})} className="accent-blue-600" />
-                                    </div>
+                                <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-white/5 text-[11px]">
+                                    <div className="flex justify-between"><span>Interval (Min)</span><input type="number" className="w-12 bg-black text-right" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value) || 1})} /></div>
+                                    <div className="flex justify-between"><span>AI Person Filter</span><input type="checkbox" checked={config.detectPerson} onChange={e => setConfig({...config, detectPerson: e.target.checked})} /></div>
                                 </div>
-                                <button onClick={() => { if(confirm('Purge all data?')) { const tx = dbRef.current.transaction(['files'], 'readwrite'); tx.objectStore('files').clear(); tx.oncomplete = updateStats; } }} className="w-full py-2 text-[10px] text-red-500 font-bold border border-red-900/30 rounded hover:bg-red-900/10">PURGE STORAGE</button>
+                                <button onClick={() => { if(confirm('Purge all stored data?')) { const tx = dbRef.current.transaction(['files'], 'readwrite'); tx.objectStore('files').clear(); tx.oncomplete = updateStats; addLog('Storage Purged', 'warning'); } }} className="w-full py-2 text-[10px] text-red-500 font-bold border border-red-900/30 rounded hover:bg-red-900/10 uppercase">Purge Local Storage</button>
                             </div>
                         )}
 
                         {activeTab === 'logs' && (
-                            <div className="bg-slate-950 border border-white/5 rounded-xl h-[400px] overflow-y-auto p-3 text-[10px] space-y-1 scrollbar-hide">
+                            <div className="bg-slate-950 border border-white/5 rounded-xl h-96 overflow-y-auto p-3 text-[10px] space-y-1 scrollbar-hide">
                                 {logs.map((l, i) => (
                                     <div key={i} className="flex gap-2 border-b border-white/5 pb-1">
                                         <span className="text-slate-600 shrink-0">[{l.time}]</span>
@@ -407,7 +421,7 @@
                                     <ul className="list-disc pl-4">
                                         <li><strong>AI Human Filter:</strong> Uses TensorFlow COCO-SSD to only save photos if a person is detected. Saves bandwidth and storage.</li>
                                         <li><strong>Tactical Queue:</strong> If you lose internet, the app saves evidence locally and uploads it automatically when back online.</li>
-                                        <li><strong>Blackout Mode:</strong> Tap the eye icon to hide the interface, making the device appear turned off while it still monitors.</li>
+                                        <li><strong>Blackout Mode:</strong> Hide the interface, making the device appear turned off while it still monitors.</li>
                                         <li><strong>Remote Commands:</strong> Control your device from anywhere in the world using Telegram messages.</li>
                                     </ul>
                                 </section>
@@ -445,7 +459,7 @@
                                     <p>Running a camera 24/7 generates heat and wears out lithium batteries. For long-term deployment:</p>
                                     <ul className="list-disc pl-4 space-y-2">
                                         <li><strong>Smart Plugs:</strong> Use a smart plug to cycle power (e.g., charge for 1 hour, off for 2 hours) to avoid keeping the battery at 100% heat.</li>
-                                        <li><strong>Advanced:</strong> If you are comfortable with hardware, some older devices can run directly from a 5V supply if the battery is removed and the terminals are bypassed (only for technical experts).</li>
+                                        <li><strong>Advanced:</strong> If you are comfortable with hardware, some older devices can run directly from a 5V supply if the battery is removed and the terminals are bypassed.</li>
                                         <li><strong>Heat Dissipation:</strong> Ensure the device is in a well-ventilated area. Remove any protective cases.</li>
                                     </ul>
                                 </section>
@@ -454,7 +468,7 @@
                     </main>
 
                     <footer className="p-4 border-t border-white/5 bg-slate-900/20 text-[8px] text-slate-700 flex justify-between uppercase font-black tracking-widest">
-                        <span>Morgby Tactical v3.2.0</span>
+                        <span>Morgby Tactical v3.2.2</span>
                         <span>{activeTab === 'manual' ? 'Reading Ops Manual' : 'Active Session'}</span>
                     </footer>
                 </div>
