@@ -40,7 +40,6 @@
             
             useEffect(() => {
                 if (window.lucide && iconRef.current) {
-                    // Use the built-in createIcons method to inject icons into data-lucide attributes
                     window.lucide.createIcons({
                         attrs: {
                             strokeWidth: 2,
@@ -94,10 +93,21 @@
             const addLog = useCallback((msg, type = 'info') => {
                 const timestamp = new Date().toLocaleTimeString();
                 setLogs(prev => [{ time: timestamp, msg, type }, ...prev].slice(0, 50));
-                console.log(`[${timestamp}] ${type.toUpperCase()}: ${msg}`);
             }, []);
 
             // --- STORAGE ---
+            const updateStats = useCallback(() => {
+                if (!dbRef.current) return;
+                const store = dbRef.current.transaction(['files'], 'readonly').objectStore('files');
+                const req = store.getAll();
+                req.onsuccess = () => {
+                    const items = req.result;
+                    const size = items.reduce((acc, curr) => acc + curr.blob.size, 0);
+                    setStorageUsed(Number((size / (1024 * 1024)).toFixed(2)));
+                    setQueueCount(items.length);
+                };
+            }, []);
+
             const initDB = () => {
                 return new Promise((resolve) => {
                     const request = indexedDB.open('MorgbyStorage', 1);
@@ -113,18 +123,6 @@
                         resolve();
                     };
                 });
-            };
-
-            const updateStats = () => {
-                if (!dbRef.current) return;
-                const store = dbRef.current.transaction(['files'], 'readonly').objectStore('files');
-                const req = store.getAll();
-                req.onsuccess = () => {
-                    const items = req.result;
-                    const size = items.reduce((acc, curr) => acc + curr.blob.size, 0);
-                    setStorageUsed(Number((size / (1024 * 1024)).toFixed(2)));
-                    setQueueCount(items.length);
-                };
             };
 
             // --- CAMERA & AI ---
@@ -150,7 +148,7 @@
                         video: { facingMode: 'environment' }, 
                         audio: false 
                     });
-                    videoRef.current.srcObject = stream;
+                    if (videoRef.current) videoRef.current.srcObject = stream;
                     streamRef.current = stream;
                     if ('wakeLock' in navigator) wakeLockRef.current = await navigator.wakeLock.request('screen');
                     addLog('Camera Stream Active', 'success');
@@ -161,90 +159,22 @@
                 }
             };
 
-            // --- TELEGRAM ---
-            const testConnection = async () => {
-                if (!config.botToken || !config.chatId) return addLog('Credentials missing', 'error');
-                setIsTestingApi(true);
-                addLog('Testing Telegram Link...', 'info');
-                try {
-                    const res = await fetch(`https://api.telegram.org/bot${config.botToken}/getMe`);
-                    const data = await res.json();
-                    if (data.ok) {
-                        addLog(`Connected to @${data.result.username}`, 'success');
-                        await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ chat_id: config.chatId, text: "✅ Morgby.OS Diagnostic: Connection Verified." })
-                        });
-                    } else addLog(data.description, 'error');
-                } catch (err) { addLog('Network Fail', 'error'); }
-                setIsTestingApi(false);
-            };
+            // --- CAPTURE LOGIC ---
+            const capture = useCallback(async (reason) => {
+                // Ensure video is running and accessible
+                if (!videoRef.current || videoRef.current.readyState < 2) {
+                    addLog('Capture failed: Camera not ready', 'error');
+                    return;
+                }
 
-            const uploadNext = async () => {
-                if (!isOnline || !dbRef.current) return;
-                const store = dbRef.current.transaction(['files'], 'readonly').objectStore('files');
-                const req = store.getAll();
-                req.onsuccess = async () => {
-                    const items = req.result;
-                    if (items.length === 0) return;
-                    
-                    const item = items[0];
-                    addLog(`Uploading item #${item.id}...`, 'info');
-                    const fd = new FormData();
-                    fd.append('chat_id', config.chatId);
-                    fd.append('photo', item.blob, 'capture.jpg');
-                    fd.append('caption', item.caption);
-
-                    try {
-                        const res = await fetch(`https://api.telegram.org/bot${config.botToken}/sendPhoto`, { method: 'POST', body: fd });
-                        if (res.ok) {
-                            const delTx = dbRef.current.transaction(['files'], 'readwrite');
-                            delTx.objectStore('files').delete(item.id);
-                            delTx.oncomplete = updateStats;
-                            addLog('Upload successful', 'success');
-                        } else {
-                            const ed = await res.json();
-                            addLog(`Fail: ${ed.description}`, 'error');
-                        }
-                    } catch (e) { addLog('Upload exception', 'error'); }
-                };
-            };
-
-            const pollUpdates = useCallback(async () => {
-                if (!isOnline || !isMonitoring || !config.botToken) return;
-                try {
-                    const res = await fetch(`https://api.telegram.org/bot${config.botToken}/getUpdates?offset=${offsetRef.current + 1}&timeout=5`);
-                    const data = await res.json();
-                    if (data.ok && data.result.length > 0) {
-                        offsetRef.current = data.result[data.result.length - 1].update_id;
-                        data.result.forEach(u => {
-                            const cmd = u.message?.text?.toLowerCase();
-                            if (cmd === '/photo') capture('Remote Request');
-                            if (cmd === '/status') {
-                                const msg = `STATUS:\n📡 Online: ${isOnline}\n📂 Storage: ${storageUsed}MB\n⏳ Queue: ${queueCount}`;
-                                fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ chat_id: config.chatId, text: msg })
-                                });
-                            }
-                        });
-                    }
-                } catch (e) {}
-            }, [isMonitoring, isOnline, config, storageUsed, queueCount]);
-
-            // --- MAIN LOOP ---
-            const capture = async (reason) => {
-                if (!videoRef.current) return;
-                addLog(`Capture: ${reason}`, 'info');
+                addLog(`Trigger: ${reason}`, 'info');
                 
                 let detected = false;
                 if (config.detectPerson && netRef.current) {
                     const preds = await netRef.current.detect(videoRef.current);
                     detected = preds.some(p => p.class === 'person');
                     if (!detected && reason === 'Scheduled') {
-                        addLog('No person detected. Skip.', 'info');
+                        addLog('No targets detected. Skipping.', 'info');
                         return;
                     }
                 }
@@ -268,10 +198,84 @@
                     });
                     tx.oncomplete = () => {
                         updateStats();
+                        // Trigger immediate upload attempt
                         uploadNext();
                     };
                 }, 'image/jpeg', 0.8);
                 setLastCaptureTime(new Date());
+            }, [config, updateStats]);
+
+            // --- TELEGRAM ---
+            const uploadNext = useCallback(async () => {
+                if (!navigator.onLine || !dbRef.current || !config.botToken) return;
+                const store = dbRef.current.transaction(['files'], 'readonly').objectStore('files');
+                const req = store.getAll();
+                req.onsuccess = async () => {
+                    const items = req.result;
+                    if (items.length === 0) return;
+                    
+                    const item = items[0];
+                    const fd = new FormData();
+                    fd.append('chat_id', config.chatId);
+                    fd.append('photo', item.blob, 'capture.jpg');
+                    fd.append('caption', item.caption);
+
+                    try {
+                        const res = await fetch(`https://api.telegram.org/bot${config.botToken}/sendPhoto`, { method: 'POST', body: fd });
+                        if (res.ok) {
+                            const delTx = dbRef.current.transaction(['files'], 'readwrite');
+                            delTx.objectStore('files').delete(item.id);
+                            delTx.oncomplete = updateStats;
+                            addLog('Evidence Transmitted', 'success');
+                        }
+                    } catch (e) {}
+                };
+            }, [config, updateStats]);
+
+            const pollUpdates = useCallback(async () => {
+                if (!navigator.onLine || !config.botToken) return;
+                try {
+                    const res = await fetch(`https://api.telegram.org/bot${config.botToken}/getUpdates?offset=${offsetRef.current + 1}&timeout=10`);
+                    const data = await res.json();
+                    if (data.ok && data.result.length > 0) {
+                        offsetRef.current = data.result[data.result.length - 1].update_id;
+                        for (const u of data.result) {
+                            const cmd = u.message?.text?.toLowerCase();
+                            if (cmd === '/photo') {
+                                addLog('Remote Command: /photo', 'info');
+                                capture('Remote Request');
+                            }
+                            if (cmd === '/status') {
+                                addLog('Remote Command: /status', 'info');
+                                const msg = `MORGBY STATUS:\n📡 Network: ONLINE\n📂 Storage: ${storageUsed}MB\n⏳ Queue: ${queueCount}\n👁 System Armed: ${isMonitoring}`;
+                                fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ chat_id: config.chatId, text: msg })
+                                });
+                            }
+                        }
+                    }
+                } catch (e) {}
+            }, [config, isMonitoring, storageUsed, queueCount, capture]);
+
+            const testConnection = async () => {
+                if (!config.botToken || !config.chatId) return addLog('Credentials missing', 'error');
+                setIsTestingApi(true);
+                addLog('Testing Telegram Link...', 'info');
+                try {
+                    const res = await fetch(`https://api.telegram.org/bot${config.botToken}/getMe`);
+                    const data = await res.json();
+                    if (data.ok) {
+                        addLog(`Connected to @${data.result.username}`, 'success');
+                        await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ chat_id: config.chatId, text: "✅ Morgby.OS Diagnostic: Connection Verified." })
+                        });
+                    } else addLog(data.description, 'error');
+                } catch (err) { addLog('Network Fail', 'error'); }
+                setIsTestingApi(false);
             };
 
             const toggleMonitor = async () => {
@@ -279,7 +283,6 @@
                     setIsMonitoring(false);
                     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
                     clearInterval(intervalRef.current);
-                    clearInterval(pollRef.current);
                     addLog('System Disarmed', 'warning');
                 } else {
                     const ok = await startCamera();
@@ -288,26 +291,44 @@
                         addLog('SYSTEM ARMED', 'success');
                         capture('Initialization');
                         intervalRef.current = setInterval(() => capture('Scheduled'), config.intervalMinutes * 60000);
-                        pollRef.current = setInterval(pollUpdates, 5000);
                     }
                 }
             };
 
+            // --- EFFECTS ---
             useEffect(() => {
                 initDB().then(loadAI);
                 const up = () => setIsOnline(true);
                 const down = () => setIsOnline(false);
                 window.addEventListener('online', up);
                 window.addEventListener('offline', down);
+                
+                // Unified polling loop for commands and uploads
+                const backgroundPulse = setInterval(() => {
+                    pollUpdates();
+                    uploadNext();
+                }, 4000);
+
                 return () => {
                     window.removeEventListener('online', up);
                     window.removeEventListener('offline', down);
+                    clearInterval(backgroundPulse);
                 };
-            }, []);
+            }, [pollUpdates, uploadNext]);
+
+            // Fix for camera blacking out on tab switch: 
+            // Re-attach stream whenever the monitor tab (and thus the video element) returns
+            useEffect(() => {
+                if (activeTab === 'monitor' && streamRef.current && videoRef.current) {
+                    videoRef.current.srcObject = streamRef.current;
+                }
+            }, [activeTab]);
 
             return (
                 <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-mono">
-                    {isBlackout && <div className="fixed inset-0 bg-black z-50" onClick={() => setIsBlackout(false)}></div>}
+                    {isBlackout && <div className="fixed inset-0 bg-black z-50 flex items-center justify-center" onClick={() => setIsBlackout(false)}>
+                        <div className="text-[8px] text-slate-800 uppercase tracking-widest">Blackout Mode Active</div>
+                    </div>}
 
                     <header className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/50">
                         <h1 className="font-black italic tracking-tighter text-sm flex items-center gap-2">
@@ -324,22 +345,22 @@
 
                     <nav className="flex p-2 bg-slate-900/30 gap-1 border-b border-white/5">
                         {['monitor', 'config', 'logs'].map(t => (
-                            <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 py-2 text-[10px] font-black uppercase rounded ${activeTab === t ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>
+                            <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 py-2 text-[10px] font-black uppercase rounded transition-colors ${activeTab === t ? 'bg-blue-600 text-white' : 'text-slate-500 hover:bg-white/5'}`}>
                                 {t}
                             </button>
                         ))}
                     </nav>
 
-                    <main className="flex-1 overflow-y-auto p-4 max-w-xl mx-auto w-full">
+                    <main className="flex-1 overflow-y-auto p-4 max-w-xl mx-auto w-full relative">
+                        {/* Persistent Hidden Video to keep stream alive when switching tabs */}
+                        <video ref={videoRef} autoPlay playsInline muted className={activeTab === 'monitor' ? "w-full aspect-video bg-black rounded-xl object-cover border border-white/5 mb-4" : "hidden"} />
+                        <canvas ref={canvasRef} className="hidden" />
+
                         {activeTab === 'monitor' && (
                             <div className="space-y-4">
-                                <div className="aspect-video bg-black rounded-xl overflow-hidden relative border border-white/5">
-                                    <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover opacity-60" />
-                                    <canvas ref={canvasRef} className="hidden" />
-                                    <div className="absolute bottom-2 left-2 flex gap-2">
-                                        <div className="bg-blue-600 text-[8px] px-1.5 py-0.5 rounded font-bold">{queueCount} QUEUED</div>
-                                        <div className="bg-slate-800 text-[8px] px-1.5 py-0.5 rounded font-bold">{storageUsed} MB</div>
-                                    </div>
+                                <div className="absolute top-8 left-8 flex gap-2 pointer-events-none">
+                                    <div className="bg-blue-600/80 text-[8px] px-1.5 py-0.5 rounded font-bold backdrop-blur-sm">{queueCount} QUEUED</div>
+                                    <div className="bg-slate-800/80 text-[8px] px-1.5 py-0.5 rounded font-bold backdrop-blur-sm">{storageUsed} MB</div>
                                 </div>
                                 
                                 <button onClick={toggleMonitor} className={`w-full py-4 rounded-xl font-black text-sm tracking-widest transition-all ${isMonitoring ? 'bg-red-600 shadow-lg shadow-red-900/20' : 'bg-blue-600 shadow-lg shadow-blue-900/20'}`}>
@@ -364,7 +385,7 @@
                         )}
 
                         {activeTab === 'config' && (
-                            <div className="space-y-4">
+                            <div className="space-y-4 animate-in fade-in duration-300">
                                 <div className="bg-slate-900 p-4 rounded-xl space-y-4 border border-white/5">
                                     <div className="flex justify-between items-center border-b border-white/5 pb-2">
                                         <span className="text-[10px] font-black uppercase text-slate-500">Bot Link</span>
@@ -372,18 +393,18 @@
                                             {isTestingApi ? 'PINGING...' : 'TEST'}
                                         </button>
                                     </div>
-                                    <input type="password" placeholder="Bot Token" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} />
-                                    <input type="text" placeholder="Chat ID" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} />
+                                    <input type="password" placeholder="Bot Token" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs focus:border-blue-500 outline-none" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} />
+                                    <input type="text" placeholder="Chat ID" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs focus:border-blue-500 outline-none" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} />
                                 </div>
 
                                 <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-white/5">
                                     <div className="flex justify-between text-[11px]">
                                         <span>Interval (Min)</span>
-                                        <input type="number" className="w-12 bg-black text-right" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value) || 1})} />
+                                        <input type="number" className="w-12 bg-black text-right outline-none" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value) || 1})} />
                                     </div>
                                     <div className="flex justify-between text-[11px]">
                                         <span>AI Human Filter</span>
-                                        <input type="checkbox" checked={config.detectPerson} onChange={e => setConfig({...config, detectPerson: e.target.checked})} />
+                                        <input type="checkbox" checked={config.detectPerson} onChange={e => setConfig({...config, detectPerson: e.target.checked})} className="accent-blue-600" />
                                     </div>
                                 </div>
                                 <button onClick={() => {
@@ -392,27 +413,27 @@
                                         tx.objectStore('files').clear();
                                         tx.oncomplete = updateStats;
                                     }
-                                }} className="w-full py-2 text-[10px] text-red-500 font-bold border border-red-900/30 rounded">PURGE STORAGE</button>
+                                }} className="w-full py-2 text-[10px] text-red-500 font-bold border border-red-900/30 rounded hover:bg-red-900/10">PURGE STORAGE</button>
                             </div>
                         )}
 
                         {activeTab === 'logs' && (
-                            <div className="bg-slate-950 border border-white/5 rounded-xl h-[400px] overflow-y-auto p-3 text-[10px] space-y-1">
+                            <div className="bg-slate-950 border border-white/5 rounded-xl h-[400px] overflow-y-auto p-3 text-[10px] space-y-1 scrollbar-hide animate-in slide-in-from-bottom-2 duration-300">
                                 {logs.map((l, i) => (
-                                    <div key={i} className="flex gap-2">
-                                        <span className="text-slate-600">[{l.time}]</span>
+                                    <div key={i} className="flex gap-2 border-b border-white/5 pb-1">
+                                        <span className="text-slate-600 shrink-0">[{l.time}]</span>
                                         <span className={l.type === 'error' ? 'text-red-400' : l.type === 'success' ? 'text-blue-400' : 'text-slate-400 uppercase'}>
                                             {l.msg}
                                         </span>
                                     </div>
                                 ))}
-                                {logs.length === 0 && <div className="text-center mt-20 text-slate-800">NO ACTIVE LOGS</div>}
+                                {logs.length === 0 && <div className="text-center mt-20 text-slate-800 font-black italic">NO ACTIVE LOGS</div>}
                             </div>
                         )}
                     </main>
 
                     <footer className="p-4 border-t border-white/5 bg-slate-900/20 text-[8px] text-slate-700 flex justify-between uppercase font-black tracking-widest">
-                        <span>Morgby Tactical v3.1</span>
+                        <span>Morgby Tactical v3.1.2</span>
                         <span>Encrypted Session</span>
                     </footer>
                 </div>
