@@ -34,9 +34,6 @@ Morgby is free and open-source. Developing and maintaining an AI-powered surveil
 
 ### 1. Initial Access
 On the device you intend to use as a camera, open the browser and go to:
-
-On the device you intend to use as a camera, go to:
-
 🔗 [**https://morgby.pages.dev/**](https://morgby.pages.dev/)
 
 ### 2. Setting Up Your Telegram Bot
@@ -56,8 +53,8 @@ You need to create an encrypted "bridge" to receive your alerts:
 ### 3. Configuring the App
 1.  On the Morgby website, click the **CONFIG** tab.
 2.  Paste your **Bot Token** and **Chat ID** into the respective fields.
-3.  Click **TEST CONNECTION**. If you receive a message on Telegram, your setup is successful.
-4.  Go to the **MONITOR** tab and click **ARM SYSTEM**.
+3.  Click **TEST TRANSMISSION**. If you receive a message on Telegram, your setup is successful.
+4.  Go to the **MONITOR** tab and click **ARM TACTICAL SUITE**.
 
 ### 4. Preventing Device Sleep
 To ensure the camera stays active 24/7, adjust these settings:
@@ -73,8 +70,9 @@ To ensure the camera stays active 24/7, adjust these settings:
 
 ### 5. Self-Hosting (Advanced) - Optional if you want to host this on your own device
 To host Morgby on your own hardware (like a PC or Raspberry Pi):
-1.  **Set up an HTTP Server:** In your project folder, run `python -m http.server 8080`.
-2.  **Enable Browser Flags:** Browsers block cameras on non-HTTPS sites unless they are "localhost." To bypass this on your local network:
+1.  Download the index.html file in this repo.
+2.  **Set up an HTTP Server:** In your project folder, run `python -m http.server 8080`.
+3.  **Enable Browser Flags:** Browsers block cameras on non-HTTPS sites unless they are "localhost." To bypass this on your local network:
     * Navigate to `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
     * Enable the flag and add your IP (e.g., `http://192.168.1.10:8080`).
     * Relaunch your browser.
