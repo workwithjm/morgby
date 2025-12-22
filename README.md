@@ -19,7 +19,7 @@ Morgby is free and open-source. Developing and maintaining an AI-powered surveil
 ## ⚡ [FEATURES]
 
 * **🧠 Human-Centric AI:** Powered by the COCO-SSD neural network, the system identifies actual human presence to virtually eliminate false alerts.
-* **🤖 Private Telegram Bridge:** Receive instant photo evidence at a frequency (default is every 15 minutes) and status reports directly to your private Telegram bot.
+* **🤖 Private Telegram Bridge:** Receive instant photo evidence at a set frequency (default is every 5 minutes) and status reports directly to your private Telegram bot.
 * **📦 Intelligent Caching:** Saves evidence to a local browser database and automatically syncs once the connection returns.
 * **🕶️ Blackout Stealth:** Dedicated mode that turns the device screen completely black for discreet monitoring.
 * **🎮 Remote Commands:** Message your bot `/photo` for an instant snapshot or `/status` to check diagnostics.
