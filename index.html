@@ -75,15 +75,15 @@
             const canvasRef = useRef(null);
             const streamRef = useRef(null);
             const netRef = useRef(null);
+            const intervalRef = useRef(null);
             const wakeLockRef = useRef(null);
             const offsetRef = useRef(0);
             const dbRef = useRef(null);
             const isProcessingCommand = useRef(false);
             const isUploading = useRef(false);
             
-            // Logic persistence refs
-            const lastScheduledRef = useRef(Date.now());
-            const heartbeatRef = useRef(null);
+            // New ref to track the last successful scheduled capture timestamp
+            const lastScheduledRef = useRef(0);
 
             useEffect(() => {
                 localStorage.setItem('morgby_cfg', JSON.stringify(config));
@@ -143,6 +143,26 @@
                 } catch (err) { addLog('AI Init Error', 'error'); }
             };
 
+            const startCamera = async () => {
+                addLog('Activating Camera...', 'info');
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, 
+                        audio: false 
+                    });
+                    if (videoRef.current) videoRef.current.srcObject = stream;
+                    streamRef.current = stream;
+                    if ('wakeLock' in navigator) {
+                         try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
+                    }
+                    addLog('Camera Stream Active', 'success');
+                    return true;
+                } catch (err) {
+                    addLog(`Camera Error: ${err.message}`, 'error');
+                    return false;
+                }
+            };
+
             const uploadNext = useCallback(async () => {
                 if (!navigator.onLine || !dbRef.current || !config.botToken || isUploading.current) return;
                 
@@ -191,15 +211,16 @@
                 } catch (e) {
                     isUploading.current = false;
                 }
-            }, [config.botToken, config.chatId, updateStats, addLog]);
+            }, [config, updateStats, addLog]);
 
             const capture = useCallback(async (reason) => {
                 if (!videoRef.current || videoRef.current.readyState < 2) return;
                 
+                let detected = false;
                 if (config.detectPerson && netRef.current) {
                     try {
                         const preds = await netRef.current.detect(videoRef.current);
-                        const detected = preds.some(p => p.class === 'person');
+                        detected = preds.some(p => p.class === 'person');
                         if (!detected && reason === 'Scheduled') {
                             addLog('Scan clear. Skipping.', 'info');
                             return;
@@ -246,32 +267,6 @@
                 setLastCaptureTime(new Date());
             }, [config.detectPerson, updateStats, uploadNext, addLog]);
 
-            const startCamera = async () => {
-                addLog('Activating Camera...', 'info');
-                try {
-                    const constraints = { 
-                        video: { 
-                            facingMode: 'environment',
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 }
-                        }, 
-                        audio: false 
-                    };
-                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                    if (videoRef.current) videoRef.current.srcObject = stream;
-                    streamRef.current = stream;
-                    
-                    if ('wakeLock' in navigator) {
-                        try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
-                    }
-                    addLog('Camera Stream Active', 'success');
-                    return true;
-                } catch (err) {
-                    addLog(`Camera Error: ${err.message}`, 'error');
-                    return false;
-                }
-            };
-
             const pollUpdates = useCallback(async () => {
                 if (!navigator.onLine || !config.botToken || isProcessingCommand.current) return;
                 isProcessingCommand.current = true;
@@ -315,17 +310,18 @@
                 setIsTestingApi(false);
             };
 
-            // REFINED MONITORING LOGIC
             const toggleMonitor = async () => {
                 if (isMonitoring) {
                     setIsMonitoring(false);
                     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-                    if (heartbeatRef.current) cancelAnimationFrame(heartbeatRef.current);
+                    // Clear references when disarming
+                    if (wakeLockRef.current) wakeLockRef.current.release();
                     addLog('System Disarmed', 'warning');
                 } else {
                     const ok = await startCamera();
                     if (ok) {
                         setIsMonitoring(true);
+                        // Reset timestamp tracking
                         lastScheduledRef.current = Date.now();
                         addLog('SYSTEM ARMED', 'success');
                         setTimeout(() => capture('Initialization'), 1500);
@@ -333,24 +329,38 @@
                 }
             };
 
-            // Robust background heartbeat
+            // NEW: Heartbeat Logic to fix Android throttling
             useEffect(() => {
-                if (!isMonitoring) return;
-
-                const runHeartbeat = () => {
-                    const now = Date.now();
-                    const intervalMs = config.intervalMinutes * 60000;
+                let heartbeat;
+                if (isMonitoring) {
+                    addLog(`Timer started: ${config.intervalMinutes}m cycle`, 'info');
                     
-                    if (now - lastScheduledRef.current >= intervalMs) {
-                        lastScheduledRef.current = now;
-                        capture('Scheduled');
-                    }
-                    heartbeatRef.current = requestAnimationFrame(runHeartbeat);
-                };
+                    // Check every 5 seconds (heartbeat)
+                    heartbeat = setInterval(() => {
+                        const now = Date.now();
+                        const intervalMs = config.intervalMinutes * 60000;
+                        const elapsed = now - lastScheduledRef.current;
+                        
+                        // If enough time passed based on system clock
+                        if (elapsed >= intervalMs) {
+                            capture('Scheduled');
+                            lastScheduledRef.current = now; // Reset trigger time
+                        }
+                    }, 5000); 
+                }
+                return () => clearInterval(heartbeat);
+            }, [isMonitoring, config.intervalMinutes, capture, addLog]);
 
-                heartbeatRef.current = requestAnimationFrame(runHeartbeat);
-                return () => cancelAnimationFrame(heartbeatRef.current);
-            }, [isMonitoring, config.intervalMinutes, capture]);
+            // Re-acquire WakeLock on visibility change (Mobile Fix)
+            useEffect(() => {
+                const handleVis = async () => {
+                    if (document.visibilityState === 'visible' && isMonitoring && 'wakeLock' in navigator) {
+                        try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
+                    }
+                };
+                document.addEventListener('visibilitychange', handleVis);
+                return () => document.removeEventListener('visibilitychange', handleVis);
+            }, [isMonitoring]);
 
             useEffect(() => {
                 initDB().then(loadAI);
@@ -358,12 +368,7 @@
                 const down = () => setIsOnline(false);
                 window.addEventListener('online', up);
                 window.addEventListener('offline', down);
-                
-                const pulse = setInterval(() => { 
-                    pollUpdates(); 
-                    uploadNext(); 
-                }, 8000);
-
+                const pulse = setInterval(() => { pollUpdates(); uploadNext(); }, 8000);
                 return () => {
                     window.removeEventListener('online', up);
                     window.removeEventListener('offline', down);
@@ -371,10 +376,16 @@
                 };
             }, [pollUpdates, uploadNext]);
 
+            useEffect(() => {
+                if (activeTab === 'monitor' && streamRef.current && videoRef.current) {
+                    videoRef.current.srcObject = streamRef.current;
+                }
+            }, [activeTab]);
+
             return (
-                <div className="flex flex-col h-screen bg-slate-950 text-slate-100">
+                <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-mono">
                     {isBlackout && <div className="fixed inset-0 bg-black z-50 flex items-center justify-center cursor-pointer" onClick={() => setIsBlackout(false)}>
-                        <div className="text-[10px] text-slate-900 uppercase tracking-[0.5em]">System Offline</div>
+                        <div className="text-[10px] text-slate-800 uppercase tracking-[0.5em]">System Offline</div>
                     </div>}
 
                     <header className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/50 backdrop-blur-md">
@@ -383,8 +394,9 @@
                             MORGBY.OS
                         </h1>
                         <div className="flex gap-4 items-center">
+                            <button onClick={() => setIsBlackout(true)} className="text-slate-500 hover:text-white"><Icon name="EyeOff" size={16} /></button>
                             <div className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 border border-white/5">
-                                {isOnline ? <span className="text-green-500">LINK ACTIVE</span> : <span className="text-red-500">NO LINK</span>}
+                                {isOnline ? <span className="text-green-500">ONLINE</span> : <span className="text-red-500">OFFLINE</span>}
                             </div>
                         </div>
                     </header>
@@ -505,12 +517,22 @@
                                     <div className="cmd-box">/status</div>
                                     <p>Returns system vitals: Network status, Storage used, and Queue length.</p>
                                 </section>
+
+                                <section className="manual-section">
+                                    <h2>[Battery & Device Management]</h2>
+                                    <p>Running a camera 24/7 generates heat and wears out lithium batteries. For long-term deployment:</p>
+                                    <ul className="list-disc pl-4 space-y-2">
+                                        <li><strong>Smart Plugs:</strong> Use a smart plug to cycle power (e.g., charge for 1 hour, off for 2 hours) to avoid keeping the battery at 100% heat.</li>
+                                        <li><strong>Advanced:</strong> If you are comfortable with hardware, some older devices can run directly from a 5V supply if the battery is removed and the terminals are bypassed.</li>
+                                        <li><strong>Heat Dissipation:</strong> Ensure the device is in a well-ventilated area. Remove any protective cases.</li>
+                                    </ul>
+                                </section>
                             </div>
                         )}
                     </main>
 
                     <footer className="p-4 border-t border-white/5 bg-slate-900/20 text-[8px] text-slate-700 flex justify-between uppercase font-black tracking-[0.2em]">
-                        <span>Morgby Tactical v3.2.3</span>
+                        <span>Morgby Tactical v3.2.4</span>
                         <span className="flex items-center gap-1">
                             <div className={`w-1 h-1 rounded-full ${isOnline ? 'bg-green-900' : 'bg-red-900'}`}></div>
                             {activeTab === 'manual' ? 'Reading Ops Manual' : 'Active Session'}
