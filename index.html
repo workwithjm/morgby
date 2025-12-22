@@ -82,7 +82,7 @@
             const isProcessingCommand = useRef(false);
             const isUploading = useRef(false);
             
-            // New ref to track the last successful scheduled capture timestamp
+            // Logic persistence refs
             const lastScheduledRef = useRef(0);
 
             useEffect(() => {
@@ -141,26 +141,6 @@
                     setIsModelLoaded(true);
                     addLog('AI Engine Online', 'success');
                 } catch (err) { addLog('AI Init Error', 'error'); }
-            };
-
-            const startCamera = async () => {
-                addLog('Activating Camera...', 'info');
-                try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ 
-                        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, 
-                        audio: false 
-                    });
-                    if (videoRef.current) videoRef.current.srcObject = stream;
-                    streamRef.current = stream;
-                    if ('wakeLock' in navigator) {
-                         try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
-                    }
-                    addLog('Camera Stream Active', 'success');
-                    return true;
-                } catch (err) {
-                    addLog(`Camera Error: ${err.message}`, 'error');
-                    return false;
-                }
             };
 
             const uploadNext = useCallback(async () => {
@@ -267,6 +247,32 @@
                 setLastCaptureTime(new Date());
             }, [config.detectPerson, updateStats, uploadNext, addLog]);
 
+            const startCamera = async () => {
+                addLog('Activating Camera...', 'info');
+                try {
+                    const constraints = { 
+                        video: { 
+                            facingMode: 'environment',
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 }
+                        }, 
+                        audio: false 
+                    };
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    if (videoRef.current) videoRef.current.srcObject = stream;
+                    streamRef.current = stream;
+                    
+                    if ('wakeLock' in navigator) {
+                        try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
+                    }
+                    addLog('Camera Stream Active', 'success');
+                    return true;
+                } catch (err) {
+                    addLog(`Camera Error: ${err.message}`, 'error');
+                    return false;
+                }
+            };
+
             const pollUpdates = useCallback(async () => {
                 if (!navigator.onLine || !config.botToken || isProcessingCommand.current) return;
                 isProcessingCommand.current = true;
@@ -314,7 +320,7 @@
                 if (isMonitoring) {
                     setIsMonitoring(false);
                     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-                    // Clear references when disarming
+                    if (intervalRef.current) clearInterval(intervalRef.current);
                     if (wakeLockRef.current) wakeLockRef.current.release();
                     addLog('System Disarmed', 'warning');
                 } else {
@@ -385,7 +391,7 @@
             return (
                 <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-mono">
                     {isBlackout && <div className="fixed inset-0 bg-black z-50 flex items-center justify-center cursor-pointer" onClick={() => setIsBlackout(false)}>
-                        <div className="text-[10px] text-slate-800 uppercase tracking-[0.5em]">System Offline</div>
+                        <div className="text-[10px] text-slate-900 uppercase tracking-[0.5em]">System Offline</div>
                     </div>}
 
                     <header className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/50 backdrop-blur-md">
