@@ -63,10 +63,11 @@
             const [isTestingApi, setIsTestingApi] = useState(false);
             const [config, setConfig] = useState(() => {
                 const saved = localStorage.getItem('morgby_cfg');
+                // Updated default interval from 15 to 5
                 return saved ? JSON.parse(saved) : {
                     botToken: '',
                     chatId: '',
-                    intervalMinutes: 15,
+                    intervalMinutes: 5,
                     detectPerson: true,
                 };
             });
@@ -82,7 +83,6 @@
             const isProcessingCommand = useRef(false);
             const isUploading = useRef(false);
             
-            // Logic persistence refs
             const lastScheduledRef = useRef(0);
 
             useEffect(() => {
@@ -143,6 +143,26 @@
                 } catch (err) { addLog('AI Init Error', 'error'); }
             };
 
+            const startCamera = async () => {
+                addLog('Activating Camera...', 'info');
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, 
+                        audio: false 
+                    });
+                    if (videoRef.current) videoRef.current.srcObject = stream;
+                    streamRef.current = stream;
+                    if ('wakeLock' in navigator) {
+                         try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
+                    }
+                    addLog('Camera Stream Active', 'success');
+                    return true;
+                } catch (err) {
+                    addLog(`Camera Error: ${err.message}`, 'error');
+                    return false;
+                }
+            };
+
             const uploadNext = useCallback(async () => {
                 if (!navigator.onLine || !dbRef.current || !config.botToken || isUploading.current) return;
                 
@@ -196,15 +216,11 @@
             const capture = useCallback(async (reason) => {
                 if (!videoRef.current || videoRef.current.readyState < 2) return;
                 
-                let detected = false;
-                if (config.detectPerson && netRef.current) {
+                let personDetected = false;
+                if (netRef.current) {
                     try {
                         const preds = await netRef.current.detect(videoRef.current);
-                        detected = preds.some(p => p.class === 'person');
-                        if (!detected && reason === 'Scheduled') {
-                            addLog('Scan clear. Skipping.', 'info');
-                            return;
-                        }
+                        personDetected = preds.some(p => p.class === 'person');
                     } catch (e) {
                         console.warn("AI detection glitch", e);
                     }
@@ -216,9 +232,10 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(videoRef.current, 0, 0);
                 
-                ctx.fillStyle = 'red';
+                ctx.fillStyle = personDetected ? 'yellow' : 'red';
                 ctx.font = 'bold 20px monospace';
                 ctx.fillText(`MORGBY | ${new Date().toLocaleString()} | ${reason}`, 10, 30);
+                if(personDetected) ctx.fillText(`[ALERT: PERSON DETECTED]`, 10, 60);
 
                 canvas.toBlob((blob) => {
                     if (!blob) {
@@ -228,11 +245,12 @@
                     
                     if (!dbRef.current) return;
 
+                    const alertTag = personDetected ? '\n[ALERT: PERSON DETECTED IN CAPTURE]' : '';
                     const tx = dbRef.current.transaction(['files'], 'readwrite');
                     const store = tx.objectStore('files');
                     const entry = { 
                         blob, 
-                        caption: `Morgby Evidence\n${new Date().toLocaleString()}\nTrigger: ${reason}`, 
+                        caption: `Morgby Evidence\n${new Date().toLocaleString()}\nTrigger: ${reason}${alertTag}`, 
                         timestamp: Date.now() 
                     };
                     
@@ -245,33 +263,7 @@
                 }, 'image/jpeg', 0.85);
                 
                 setLastCaptureTime(new Date());
-            }, [config.detectPerson, updateStats, uploadNext, addLog]);
-
-            const startCamera = async () => {
-                addLog('Activating Camera...', 'info');
-                try {
-                    const constraints = { 
-                        video: { 
-                            facingMode: 'environment',
-                            width: { ideal: 1280 },
-                            height: { ideal: 720 }
-                        }, 
-                        audio: false 
-                    };
-                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                    if (videoRef.current) videoRef.current.srcObject = stream;
-                    streamRef.current = stream;
-                    
-                    if ('wakeLock' in navigator) {
-                        try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
-                    }
-                    addLog('Camera Stream Active', 'success');
-                    return true;
-                } catch (err) {
-                    addLog(`Camera Error: ${err.message}`, 'error');
-                    return false;
-                }
-            };
+            }, [updateStats, uploadNext, addLog]);
 
             const pollUpdates = useCallback(async () => {
                 if (!navigator.onLine || !config.botToken || isProcessingCommand.current) return;
@@ -320,14 +312,12 @@
                 if (isMonitoring) {
                     setIsMonitoring(false);
                     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-                    if (intervalRef.current) clearInterval(intervalRef.current);
                     if (wakeLockRef.current) wakeLockRef.current.release();
                     addLog('System Disarmed', 'warning');
                 } else {
                     const ok = await startCamera();
                     if (ok) {
                         setIsMonitoring(true);
-                        // Reset timestamp tracking
                         lastScheduledRef.current = Date.now();
                         addLog('SYSTEM ARMED', 'success');
                         setTimeout(() => capture('Initialization'), 1500);
@@ -335,29 +325,23 @@
                 }
             };
 
-            // NEW: Heartbeat Logic to fix Android throttling
             useEffect(() => {
                 let heartbeat;
                 if (isMonitoring) {
                     addLog(`Timer started: ${config.intervalMinutes}m cycle`, 'info');
-                    
-                    // Check every 5 seconds (heartbeat)
                     heartbeat = setInterval(() => {
                         const now = Date.now();
                         const intervalMs = config.intervalMinutes * 60000;
                         const elapsed = now - lastScheduledRef.current;
-                        
-                        // If enough time passed based on system clock
                         if (elapsed >= intervalMs) {
                             capture('Scheduled');
-                            lastScheduledRef.current = now; // Reset trigger time
+                            lastScheduledRef.current = now;
                         }
                     }, 5000); 
                 }
                 return () => clearInterval(heartbeat);
             }, [isMonitoring, config.intervalMinutes, capture, addLog]);
 
-            // Re-acquire WakeLock on visibility change (Mobile Fix)
             useEffect(() => {
                 const handleVis = async () => {
                     if (document.visibilityState === 'visible' && isMonitoring && 'wakeLock' in navigator) {
@@ -391,7 +375,7 @@
             return (
                 <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-mono">
                     {isBlackout && <div className="fixed inset-0 bg-black z-50 flex items-center justify-center cursor-pointer" onClick={() => setIsBlackout(false)}>
-                        <div className="text-[10px] text-slate-900 uppercase tracking-[0.5em]">System Offline</div>
+                        <div className="text-[10px] text-slate-800 uppercase tracking-[0.5em]">System Offline</div>
                     </div>}
 
                     <header className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/50 backdrop-blur-md">
@@ -461,7 +445,7 @@
                                 </div>
                                 <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-white/5 text-[11px]">
                                     <div className="flex justify-between items-center"><span>Interval (Minutes)</span><input type="number" className="w-16 bg-black text-right border border-white/5 p-1 rounded" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value) || 1})} /></div>
-                                    <div className="flex justify-between items-center"><span>AI Person Filter</span><input type="checkbox" className="w-4 h-4" checked={config.detectPerson} onChange={e => setConfig({...config, detectPerson: e.target.checked})} /></div>
+                                    <div className="flex justify-between items-center text-slate-500 italic text-[10px]"><span>* AI will now alert in captions instead of filtering captures</span></div>
                                 </div>
                                 <button onClick={() => { if(confirm('Purge all stored data?')) { const tx = dbRef.current.transaction(['files'], 'readwrite'); tx.objectStore('files').clear(); tx.oncomplete = updateStats; addLog('Storage Purged', 'warning'); } }} className="w-full py-2 text-[10px] text-red-500 font-bold border border-red-900/30 rounded hover:bg-red-900/10 uppercase transition-colors">Purge Local Storage</button>
                             </div>
@@ -490,7 +474,7 @@
                                 <section className="manual-section">
                                     <h2>[Features]</h2>
                                     <ul className="list-disc pl-4">
-                                        <li><strong>AI Human Filter:</strong> Uses TensorFlow COCO-SSD to only save photos if a person is detected.</li>
+                                        <li><strong>AI Analysis:</strong> Detects people in frame and provides alerts in Telegram captions.</li>
                                         <li><strong>Tactical Queue:</strong> If you lose internet, the app saves evidence locally and uploads it automatically when back online.</li>
                                         <li><strong>Remote Commands:</strong> Control your device from anywhere using Telegram messages.</li>
                                     </ul>
