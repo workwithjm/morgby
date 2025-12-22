@@ -75,12 +75,15 @@
             const canvasRef = useRef(null);
             const streamRef = useRef(null);
             const netRef = useRef(null);
-            const intervalRef = useRef(null);
             const wakeLockRef = useRef(null);
             const offsetRef = useRef(0);
             const dbRef = useRef(null);
             const isProcessingCommand = useRef(false);
             const isUploading = useRef(false);
+            
+            // Logic persistence refs
+            const lastScheduledRef = useRef(Date.now());
+            const heartbeatRef = useRef(null);
 
             useEffect(() => {
                 localStorage.setItem('morgby_cfg', JSON.stringify(config));
@@ -312,32 +315,43 @@
                 setIsTestingApi(false);
             };
 
+            // REFINED MONITORING LOGIC
             const toggleMonitor = async () => {
                 if (isMonitoring) {
                     setIsMonitoring(false);
                     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-                    if (intervalRef.current) {
-                        clearInterval(intervalRef.current);
-                        intervalRef.current = null;
-                    }
+                    if (heartbeatRef.current) cancelAnimationFrame(heartbeatRef.current);
                     addLog('System Disarmed', 'warning');
                 } else {
                     const ok = await startCamera();
                     if (ok) {
                         setIsMonitoring(true);
+                        lastScheduledRef.current = Date.now();
                         addLog('SYSTEM ARMED', 'success');
                         setTimeout(() => capture('Initialization'), 1500);
-                        
-                        // Fix: Ensure the interval is cleared before setting a new one
-                        if (intervalRef.current) clearInterval(intervalRef.current);
-                        intervalRef.current = setInterval(() => {
-                            capture('Scheduled');
-                        }, config.intervalMinutes * 60000);
                     }
                 }
             };
 
-            // Effect for global tasks and cleanup
+            // Robust background heartbeat
+            useEffect(() => {
+                if (!isMonitoring) return;
+
+                const runHeartbeat = () => {
+                    const now = Date.now();
+                    const intervalMs = config.intervalMinutes * 60000;
+                    
+                    if (now - lastScheduledRef.current >= intervalMs) {
+                        lastScheduledRef.current = now;
+                        capture('Scheduled');
+                    }
+                    heartbeatRef.current = requestAnimationFrame(runHeartbeat);
+                };
+
+                heartbeatRef.current = requestAnimationFrame(runHeartbeat);
+                return () => cancelAnimationFrame(heartbeatRef.current);
+            }, [isMonitoring, config.intervalMinutes, capture]);
+
             useEffect(() => {
                 initDB().then(loadAI);
                 const up = () => setIsOnline(true);
@@ -354,19 +368,8 @@
                     window.removeEventListener('online', up);
                     window.removeEventListener('offline', down);
                     clearInterval(pulse);
-                    if (intervalRef.current) clearInterval(intervalRef.current);
                 };
             }, [pollUpdates, uploadNext]);
-
-            // Effect to handle interval changes while monitoring is active
-            useEffect(() => {
-                if (isMonitoring) {
-                    if (intervalRef.current) clearInterval(intervalRef.current);
-                    intervalRef.current = setInterval(() => {
-                        capture('Scheduled');
-                    }, config.intervalMinutes * 60000);
-                }
-            }, [config.intervalMinutes, isMonitoring, capture]);
 
             return (
                 <div className="flex flex-col h-screen bg-slate-950 text-slate-100">
