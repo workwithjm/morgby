@@ -44,15 +44,9 @@ You need to create an encrypted "bridge" to receive your alerts:
 4.  Search for `@userinfobot` in Telegram and send it a message. It will reply with your **Chat ID** (a 9-10 digit number). Copy this.
 5.  **Crucial:** Open your new bot in Telegram and press **START**.
 
-1. **Open Telegram** and search for `@BotFather`.
-2. Send `/newbot` and follow the prompts.
-3. Copy the **API Token** provided.
-4. Search for `@userinfobot` to get your **Chat ID**.
-5. **Important:** Open your new bot in Telegram and press **START**.
-
 ### 3. Configuring the App
 1.  On the Morgby website, click the **CONFIG** tab.
-2.  Paste your **Bot Token** and **Chat ID** into the respective fields.
+2.  Enter your **Bot Token** and **Chat ID** into the respective fields.
 3.  Click **TEST TRANSMISSION**. If you receive a message on Telegram, your setup is successful.
 4.  Go to the **MONITOR** tab and click **ARM TACTICAL SUITE**.
 
@@ -80,7 +74,7 @@ To host Morgby on your own hardware (like a PC or Raspberry Pi):
 ---
 
 ## 🔋 [BATTERY & DEVICE MANAGEMENT]
-Since this is a high-performance web app, it does not manage your hardware's battery. Follow these tips to keep your device healthy:
+Since this is a web app, it does not manage your hardware's battery. Follow these tips to keep your device healthy:
 
 * **♨️ Heat Management:** AI processing generates significant heat. **Always remove phone cases** and ensure the device is in a well-ventilated area.
 * **🔌 Smart Plug Strategy:** To prevent battery "swelling" from being at 100% charge indefinitely, use a **Smart Plug**. Set a timer to charge the device for 1 hour every 4-5 hours.
