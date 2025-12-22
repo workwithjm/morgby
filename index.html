@@ -5,15 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>MORGBY.OS | Tactical Suite</title>
+    <title>MORGBY | Tactical Suite</title>
     
-    <!-- PWA Manifest (Inline) -->
     <link rel="manifest" href='data:application/json,{"name":"Morgby Tactical","short_name":"Morgby","start_url":".","display":"standalone","background_color":"#020617","theme_color":"#020617"}'>
     
-    <!-- Tailwind for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- React & Dependencies -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -21,12 +17,11 @@
     
     <style>
         :root { --bg: #020617; --text: #f8fafc; --accent: #2563eb; --danger: #dc2626; }
-        body { background: var(--bg); color: var(--text); font-family: sans-serif; margin: 0; padding: 0; overflow: hidden; }
+        body { background: var(--bg); color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; margin: 0; padding: 0; overflow: hidden; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         
-        /* Tactical list styling for manual */
         .manual-section h2 { color: #3b82f6; font-size: 0.75rem; font-weight: 900; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 0.5rem; border-left: 2px solid #3b82f6; padding-left: 0.5rem; }
         .manual-section p, .manual-section li { font-size: 0.75rem; color: #94a3b8; line-height: 1.5; margin-bottom: 0.75rem; }
         .manual-section strong { color: #f1f5f9; }
@@ -35,37 +30,6 @@
 </head>
 <body>
     <div id="root"></div>
-
-    <!-- Service Worker Registration -->
-    <script>
-        if ('serviceWorker' in navigator) {
-            const swCode = `
-                const CACHE_NAME = 'morgby-v1';
-                const ASSETS = [
-                    '${window.location.origin}${window.location.pathname}',
-                    'https://cdn.tailwindcss.com',
-                    'https://unpkg.com/react@18/umd/react.production.min.js',
-                    'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
-                    'https://unpkg.com/@babel/standalone/babel.min.js',
-                    'https://unpkg.com/lucide@latest',
-                    'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0',
-                    'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2'
-                ];
-
-                self.addEventListener('install', (e) => {
-                    e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
-                });
-
-                self.addEventListener('fetch', (e) => {
-                    e.respondWith(caches.match(e.request).then(res => res || fetch(e.request)));
-                });
-            `;
-            const swUrl = 'data:application/javascript;base64,' + btoa(swCode);
-            navigator.serviceWorker.register(swUrl).catch(err => {
-                console.warn('ServiceWorker registration failed:', err);
-            });
-        }
-    </script>
 
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
@@ -116,6 +80,7 @@
             const offsetRef = useRef(0);
             const dbRef = useRef(null);
             const isProcessingCommand = useRef(false);
+            const isUploading = useRef(false);
 
             useEffect(() => {
                 localStorage.setItem('morgby_cfg', JSON.stringify(config));
@@ -128,14 +93,19 @@
 
             const updateStats = useCallback(() => {
                 if (!dbRef.current) return;
-                const store = dbRef.current.transaction(['files'], 'readonly').objectStore('files');
-                const req = store.getAll();
-                req.onsuccess = () => {
-                    const items = req.result;
-                    const size = items.reduce((acc, curr) => acc + curr.blob.size, 0);
-                    setStorageUsed(Number((size / (1024 * 1024)).toFixed(2)));
-                    setQueueCount(items.length);
-                };
+                try {
+                    const tx = dbRef.current.transaction(['files'], 'readonly');
+                    const store = tx.objectStore('files');
+                    const req = store.getAll();
+                    req.onsuccess = () => {
+                        const items = req.result;
+                        const size = items.reduce((acc, curr) => acc + (curr.blob?.size || 0), 0);
+                        setStorageUsed(Number((size / (1024 * 1024)).toFixed(2)));
+                        setQueueCount(items.length);
+                    };
+                } catch (e) {
+                    console.error("Stats update failed", e);
+                }
             }, []);
 
             const initDB = () => {
@@ -170,34 +140,71 @@
                 } catch (err) { addLog('AI Init Error', 'error'); }
             };
 
-            const startCamera = async () => {
-                addLog('Activating Camera...', 'info');
+            const uploadNext = useCallback(async () => {
+                if (!navigator.onLine || !dbRef.current || !config.botToken || isUploading.current) return;
+                
+                isUploading.current = true;
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ 
-                        video: { facingMode: 'environment' }, 
-                        audio: false 
-                    });
-                    if (videoRef.current) videoRef.current.srcObject = stream;
-                    streamRef.current = stream;
-                    if ('wakeLock' in navigator) wakeLockRef.current = await navigator.wakeLock.request('screen');
-                    addLog('Camera Stream Active', 'success');
-                    return true;
-                } catch (err) {
-                    addLog(`Camera Error: ${err.message}`, 'error');
-                    return false;
+                    const tx = dbRef.current.transaction(['files'], 'readonly');
+                    const store = tx.objectStore('files');
+                    const req = store.openCursor();
+
+                    req.onsuccess = async (event) => {
+                        const cursor = event.target.result;
+                        if (!cursor) {
+                            isUploading.current = false;
+                            return;
+                        }
+
+                        const item = cursor.value;
+                        const fd = new FormData();
+                        fd.append('chat_id', config.chatId);
+                        fd.append('photo', item.blob, 'capture.jpg');
+                        fd.append('caption', item.caption);
+
+                        try {
+                            const res = await fetch(`https://api.telegram.org/bot${config.botToken}/sendPhoto`, { 
+                                method: 'POST', 
+                                body: fd 
+                            });
+                            
+                            if (res.ok) {
+                                const delTx = dbRef.current.transaction(['files'], 'readwrite');
+                                delTx.objectStore('files').delete(item.id);
+                                delTx.oncomplete = () => {
+                                    updateStats();
+                                    addLog('Evidence Transmitted', 'success');
+                                    isUploading.current = false;
+                                    // Try next one immediately
+                                    setTimeout(uploadNext, 500);
+                                };
+                            } else {
+                                isUploading.current = false;
+                            }
+                        } catch (e) {
+                            isUploading.current = false;
+                        }
+                    };
+                    req.onerror = () => { isUploading.current = false; };
+                } catch (e) {
+                    isUploading.current = false;
                 }
-            };
+            }, [config, updateStats, addLog]);
 
             const capture = useCallback(async (reason) => {
                 if (!videoRef.current || videoRef.current.readyState < 2) return;
                 
-                let detected = false;
+                // Logic Fix: Only run AI if monitoring is actually active or requested
                 if (config.detectPerson && netRef.current) {
-                    const preds = await netRef.current.detect(videoRef.current);
-                    detected = preds.some(p => p.class === 'person');
-                    if (!detected && reason === 'Scheduled') {
-                        addLog('Scan clear. Skipping save.', 'info');
-                        return;
+                    try {
+                        const preds = await netRef.current.detect(videoRef.current);
+                        const detected = preds.some(p => p.class === 'person');
+                        if (!detected && reason === 'Scheduled') {
+                            addLog('Scan clear. Skipping.', 'info');
+                            return;
+                        }
+                    } catch (e) {
+                        console.warn("AI detection glitch", e);
                     }
                 }
 
@@ -207,50 +214,64 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(videoRef.current, 0, 0);
                 
+                // Burn-in timestamp
                 ctx.fillStyle = 'red';
-                ctx.font = '20px monospace';
+                ctx.font = 'bold 20px monospace';
                 ctx.fillText(`MORGBY | ${new Date().toLocaleString()} | ${reason}`, 10, 30);
 
+                // Mobile Fix: Using a explicit blob conversion with quality fallback
                 canvas.toBlob((blob) => {
+                    if (!blob) {
+                        addLog('Capture failed (Blob null)', 'error');
+                        return;
+                    }
+                    
+                    if (!dbRef.current) return;
+
                     const tx = dbRef.current.transaction(['files'], 'readwrite');
-                    tx.objectStore('files').add({ 
+                    const store = tx.objectStore('files');
+                    const entry = { 
                         blob, 
                         caption: `Morgby Evidence\n${new Date().toLocaleString()}\nTrigger: ${reason}`, 
                         timestamp: Date.now() 
-                    });
+                    };
+                    
+                    const addReq = store.add(entry);
                     tx.oncomplete = () => {
                         updateStats();
-                        uploadNext();
+                        uploadNext(); // Trigger upload immediately after saving
                     };
-                }, 'image/jpeg', 0.8);
+                    tx.onerror = () => addLog('Storage Error', 'error');
+                }, 'image/jpeg', 0.85);
+                
                 setLastCaptureTime(new Date());
-            }, [config, updateStats]);
+            }, [config, updateStats, uploadNext, addLog]);
 
-            const uploadNext = useCallback(async () => {
-                if (!navigator.onLine || !dbRef.current || !config.botToken) return;
-                const store = dbRef.current.transaction(['files'], 'readonly').objectStore('files');
-                const req = store.getAll();
-                req.onsuccess = async () => {
-                    const items = req.result;
-                    if (items.length === 0) return;
+            const startCamera = async () => {
+                addLog('Activating Camera...', 'info');
+                try {
+                    const constraints = { 
+                        video: { 
+                            facingMode: 'environment',
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 }
+                        }, 
+                        audio: false 
+                    };
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    if (videoRef.current) videoRef.current.srcObject = stream;
+                    streamRef.current = stream;
                     
-                    const item = items[0];
-                    const fd = new FormData();
-                    fd.append('chat_id', config.chatId);
-                    fd.append('photo', item.blob, 'capture.jpg');
-                    fd.append('caption', item.caption);
-
-                    try {
-                        const res = await fetch(`https://api.telegram.org/bot${config.botToken}/sendPhoto`, { method: 'POST', body: fd });
-                        if (res.ok) {
-                            const delTx = dbRef.current.transaction(['files'], 'readwrite');
-                            delTx.objectStore('files').delete(item.id);
-                            delTx.oncomplete = updateStats;
-                            addLog('Evidence Transmitted', 'success');
-                        }
-                    } catch (e) {}
-                };
-            }, [config, updateStats]);
+                    if ('wakeLock' in navigator) {
+                        try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
+                    }
+                    addLog('Camera Stream Active', 'success');
+                    return true;
+                } catch (err) {
+                    addLog(`Camera Error: ${err.message}`, 'error');
+                    return false;
+                }
+            };
 
             const pollUpdates = useCallback(async () => {
                 if (!navigator.onLine || !config.botToken || isProcessingCommand.current) return;
@@ -299,14 +320,14 @@
                 if (isMonitoring) {
                     setIsMonitoring(false);
                     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-                    clearInterval(intervalRef.current);
+                    if (intervalRef.current) clearInterval(intervalRef.current);
                     addLog('System Disarmed', 'warning');
                 } else {
                     const ok = await startCamera();
                     if (ok) {
                         setIsMonitoring(true);
                         addLog('SYSTEM ARMED', 'success');
-                        capture('Initialization');
+                        setTimeout(() => capture('Initialization'), 1000);
                         intervalRef.current = setInterval(() => capture('Scheduled'), config.intervalMinutes * 60000);
                     }
                 }
@@ -318,61 +339,69 @@
                 const down = () => setIsOnline(false);
                 window.addEventListener('online', up);
                 window.addEventListener('offline', down);
-                const pulse = setInterval(() => { pollUpdates(); uploadNext(); }, 5000);
+                
+                const pulse = setInterval(() => { 
+                    pollUpdates(); 
+                    uploadNext(); 
+                }, 8000);
+
                 return () => {
                     window.removeEventListener('online', up);
                     window.removeEventListener('offline', down);
                     clearInterval(pulse);
+                    if (intervalRef.current) clearInterval(intervalRef.current);
                 };
             }, [pollUpdates, uploadNext]);
 
             return (
-                <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-mono">
-                    {isBlackout && <div className="fixed inset-0 bg-black z-50 flex items-center justify-center" onClick={() => setIsBlackout(false)}>
-                        <div className="text-[8px] text-slate-800 uppercase tracking-widest">Blackout Mode Active</div>
+                <div className="flex flex-col h-screen bg-slate-950 text-slate-100">
+                    {isBlackout && <div className="fixed inset-0 bg-black z-50 flex items-center justify-center cursor-pointer" onClick={() => setIsBlackout(false)}>
+                        <div className="text-[10px] text-slate-900 uppercase tracking-[0.5em]">System Offline</div>
                     </div>}
 
-                    <header className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/50">
+                    <header className="p-4 border-b border-white/5 flex justify-between items-center bg-slate-900/50 backdrop-blur-md">
                         <h1 className="font-black italic tracking-tighter text-sm flex items-center gap-2">
                             <div className={`w-2 h-2 rounded-full ${isMonitoring ? 'bg-red-500 animate-pulse' : 'bg-slate-700'}`}></div>
                             MORGBY.OS
                         </h1>
                         <div className="flex gap-4 items-center">
                             <div className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 border border-white/5">
-                                {isOnline ? <span className="text-green-500">ONLINE</span> : <span className="text-red-500">OFFLINE</span>}
+                                {isOnline ? <span className="text-green-500">LINK ACTIVE</span> : <span className="text-red-500">NO LINK</span>}
                             </div>
                         </div>
                     </header>
 
                     <nav className="flex p-2 bg-slate-900/30 gap-1 border-b border-white/5 overflow-x-auto scrollbar-hide">
                         {['monitor', 'config', 'logs', 'manual'].map(t => (
-                            <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 min-w-[80px] py-2 text-[10px] font-black uppercase rounded transition-colors ${activeTab === t ? 'bg-blue-600 text-white' : 'text-slate-500 hover:bg-white/5'}`}>
+                            <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 min-w-[80px] py-2 text-[10px] font-black uppercase rounded transition-all ${activeTab === t ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-500 hover:bg-white/5'}`}>
                                 {t}
                             </button>
                         ))}
                     </nav>
 
                     <main className="flex-1 overflow-y-auto p-4 max-w-xl mx-auto w-full relative">
-                        <video ref={videoRef} autoPlay playsInline muted className={activeTab === 'monitor' ? "w-full aspect-video bg-black rounded-xl object-cover border border-white/5 mb-4" : "hidden"} />
+                        <div className={activeTab === 'monitor' ? "block" : "hidden"}>
+                            <video ref={videoRef} autoPlay playsInline muted className="w-full aspect-video bg-black rounded-xl object-cover border border-white/5 mb-4 shadow-2xl" />
+                        </div>
                         <canvas ref={canvasRef} className="hidden" />
 
                         {activeTab === 'monitor' && (
                             <div className="space-y-4">
                                 <div className="space-y-2">
-                                    <button onClick={toggleMonitor} className={`w-full py-4 rounded-xl font-black text-sm tracking-widest transition-all ${isMonitoring ? 'bg-red-600' : 'bg-blue-600'}`}>
+                                    <button onClick={toggleMonitor} className={`w-full py-4 rounded-xl font-black text-sm tracking-widest transition-all active:scale-[0.98] ${isMonitoring ? 'bg-red-600' : 'bg-blue-600'}`}>
                                         {isMonitoring ? 'DISARM SYSTEM' : 'ARM TACTICAL SUITE'}
                                     </button>
-                                    <button onClick={() => setIsBlackout(true)} className="w-full py-3 rounded-xl font-black text-xs tracking-widest bg-slate-900 border border-white/10 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center gap-2">
+                                    <button onClick={() => setIsBlackout(true)} className="w-full py-3 rounded-xl font-black text-xs tracking-widest bg-slate-900 border border-white/10 text-slate-400 hover:text-white hover:bg-slate-800 flex items-center justify-center gap-2 transition-colors">
                                         <Icon name="EyeOff" size={14} /> ENTER BLACKOUT MODE
                                     </button>
                                 </div>
                                 <div className="grid grid-cols-2 gap-2">
                                     <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5">
                                         <div className="text-[8px] text-slate-500 uppercase font-black">Storage</div>
-                                        <div className="text-xs font-bold mt-1">{storageUsed} MB ({queueCount} Files)</div>
+                                        <div className="text-xs font-bold mt-1 text-blue-400">{storageUsed} MB ({queueCount} Files)</div>
                                     </div>
                                     <div className="bg-slate-900/50 p-4 rounded-xl border border-white/5">
-                                        <div className="text-[8px] text-slate-500 uppercase font-black">AI Status</div>
+                                        <div className="text-[8px] text-slate-500 uppercase font-black">AI Engine</div>
                                         <div className={`text-xs font-bold mt-1 ${isModelLoaded ? 'text-green-500' : 'text-yellow-500 animate-pulse'}`}>
                                             {isModelLoaded ? 'READY' : 'LOADING...'}
                                         </div>
@@ -384,22 +413,29 @@
                         {activeTab === 'config' && (
                             <div className="space-y-4">
                                 <div className="bg-slate-900 p-4 rounded-xl space-y-4 border border-white/5">
-                                    <input type="password" placeholder="Bot Token" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs outline-none" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} />
-                                    <input type="text" placeholder="Chat ID" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs outline-none" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} />
-                                    <button onClick={testConnection} disabled={isTestingApi} className="w-full py-2 bg-blue-600 rounded text-[10px] font-bold">TEST LINK</button>
+                                    <div>
+                                        <label className="text-[10px] text-slate-500 font-bold block mb-1">BOT TOKEN</label>
+                                        <input type="password" placeholder="12345678:ABC..." className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs outline-none focus:border-blue-500 transition-colors" value={config.botToken} onChange={e => setConfig({...config, botToken: e.target.value})} />
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] text-slate-500 font-bold block mb-1">CHAT ID</label>
+                                        <input type="text" placeholder="987654321" className="w-full bg-slate-950 border border-white/5 p-2 rounded text-xs outline-none focus:border-blue-500 transition-colors" value={config.chatId} onChange={e => setConfig({...config, chatId: e.target.value})} />
+                                    </div>
+                                    <button onClick={testConnection} disabled={isTestingApi} className="w-full py-2 bg-blue-600 rounded text-[10px] font-bold active:scale-[0.98] transition-transform">TEST TRANSMISSION</button>
                                 </div>
                                 <div className="bg-slate-900 p-4 rounded-xl space-y-3 border border-white/5 text-[11px]">
-                                    <div className="flex justify-between"><span>Interval (Min)</span><input type="number" className="w-12 bg-black text-right" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value) || 1})} /></div>
-                                    <div className="flex justify-between"><span>AI Person Filter</span><input type="checkbox" checked={config.detectPerson} onChange={e => setConfig({...config, detectPerson: e.target.checked})} /></div>
+                                    <div className="flex justify-between items-center"><span>Interval (Minutes)</span><input type="number" className="w-16 bg-black text-right border border-white/5 p-1 rounded" value={config.intervalMinutes} onChange={e => setConfig({...config, intervalMinutes: parseInt(e.target.value) || 1})} /></div>
+                                    <div className="flex justify-between items-center"><span>AI Person Filter</span><input type="checkbox" className="w-4 h-4" checked={config.detectPerson} onChange={e => setConfig({...config, detectPerson: e.target.checked})} /></div>
                                 </div>
-                                <button onClick={() => { if(confirm('Purge all stored data?')) { const tx = dbRef.current.transaction(['files'], 'readwrite'); tx.objectStore('files').clear(); tx.oncomplete = updateStats; addLog('Storage Purged', 'warning'); } }} className="w-full py-2 text-[10px] text-red-500 font-bold border border-red-900/30 rounded hover:bg-red-900/10 uppercase">Purge Local Storage</button>
+                                <button onClick={() => { if(confirm('Purge all stored data?')) { const tx = dbRef.current.transaction(['files'], 'readwrite'); tx.objectStore('files').clear(); tx.oncomplete = updateStats; addLog('Storage Purged', 'warning'); } }} className="w-full py-2 text-[10px] text-red-500 font-bold border border-red-900/30 rounded hover:bg-red-900/10 uppercase transition-colors">Purge Local Storage</button>
                             </div>
                         )}
 
                         {activeTab === 'logs' && (
-                            <div className="bg-slate-950 border border-white/5 rounded-xl h-96 overflow-y-auto p-3 text-[10px] space-y-1 scrollbar-hide">
+                            <div className="bg-slate-950 border border-white/5 rounded-xl h-96 overflow-y-auto p-3 text-[10px] space-y-1 scrollbar-hide font-mono">
+                                {logs.length === 0 && <div className="text-slate-800 text-center mt-20">NO LOGS ON RECORD</div>}
                                 {logs.map((l, i) => (
-                                    <div key={i} className="flex gap-2 border-b border-white/5 pb-1">
+                                    <div key={i} className="flex gap-2 border-b border-white/5 pb-1 last:border-0">
                                         <span className="text-slate-600 shrink-0">[{l.time}]</span>
                                         <span className={l.type === 'error' ? 'text-red-400' : l.type === 'success' ? 'text-blue-400' : 'text-slate-400 uppercase'}>{l.msg}</span>
                                     </div>
@@ -412,17 +448,15 @@
                                 <section className="manual-section">
                                     <h2>[Disclaimer]</h2>
                                     <p>Morgby Tactical Suite is intended strictly for <strong>personal surveillance</strong>. Use cases include home security monitoring, baby monitoring, or pet observation. This application is NOT to be used for illegal surveillance, privacy invasion, or any criminal activities. The user assumes all legal responsibility for how the application is deployed.</p>
-                                    <p><strong>Privacy:</strong> Your data remains yours. This app communicates <strong>directly</strong> with the Telegram API. No third-party servers see your photos or credentials. All images are stored locally in your browser's IndexedDB until successfully transmitted to your bot.</p>
-                                    <p><strong>Status:</strong> This is a work-in-progress (WIP). You may encounter bugs or connection drops. Always test your setup before relying on it for monitoring.</p>
+                                    <p><strong>Privacy:</strong> Your data remains yours. This app communicates <strong>directly</strong> with the Telegram API. No third-party servers see your photos or credentials. All images are stored locally in your browser's IndexedDB until successfully transmitted.</p>
                                 </section>
 
                                 <section className="manual-section">
                                     <h2>[Features]</h2>
                                     <ul className="list-disc pl-4">
-                                        <li><strong>AI Human Filter:</strong> Uses TensorFlow COCO-SSD to only save photos if a person is detected. Saves bandwidth and storage.</li>
+                                        <li><strong>AI Human Filter:</strong> Uses TensorFlow COCO-SSD to only save photos if a person is detected.</li>
                                         <li><strong>Tactical Queue:</strong> If you lose internet, the app saves evidence locally and uploads it automatically when back online.</li>
-                                        <li><strong>Blackout Mode:</strong> Hide the interface, making the device appear turned off while it still monitors.</li>
-                                        <li><strong>Remote Commands:</strong> Control your device from anywhere in the world using Telegram messages.</li>
+                                        <li><strong>Remote Commands:</strong> Control your device from anywhere using Telegram messages.</li>
                                     </ul>
                                 </section>
 
@@ -431,18 +465,18 @@
                                     <p><strong>1. Create a Telegram Bot:</strong></p>
                                     <ol className="list-decimal pl-4 space-y-2 mb-4">
                                         <li>Search for <strong>@BotFather</strong> on Telegram.</li>
-                                        <li>Send <code>/newbot</code> and follow the prompts.</li>
-                                        <li>Copy the <strong>API Token</strong> provided (looks like <code>1234:ABCDEF...</code>).</li>
+                                        <li>Send <code>/newbot</code> and follow prompts.</li>
+                                        <li>Copy the <strong>API Token</strong> provided.</li>
                                     </ol>
                                     <p><strong>2. Get your Chat ID:</strong></p>
                                     <ol className="list-decimal pl-4 space-y-2 mb-4">
                                         <li>Search for <strong>@userinfobot</strong> on Telegram.</li>
-                                        <li>Send any message to it. It will reply with your <strong>Id</strong> (a number).</li>
+                                        <li>Send any message to it to get your <strong>Id</strong>.</li>
                                     </ol>
                                     <p><strong>3. Prevent Device Sleep:</strong></p>
                                     <ul className="list-disc pl-4 space-y-2">
-                                        <li><strong>Android:</strong> Go to Settings > Developer Options > Enable "Stay Awake" (while charging). Also, disable Battery Optimization for your browser.</li>
-                                        <li><strong>iOS:</strong> Go to Settings > Display & Brightness > Auto-Lock > Set to "Never".</li>
+                                        <li><strong>Android:</strong> Settings > Developer Options > "Stay Awake" (while charging).</li>
+                                        <li><strong>iOS:</strong> Settings > Display & Brightness > Auto-Lock > "Never".</li>
                                     </ul>
                                 </section>
 
@@ -453,23 +487,16 @@
                                     <div className="cmd-box">/status</div>
                                     <p>Returns system vitals: Network status, Storage used, and Queue length.</p>
                                 </section>
-
-                                <section className="manual-section">
-                                    <h2>[Battery & Device Management]</h2>
-                                    <p>Running a camera 24/7 generates heat and wears out lithium batteries. For long-term deployment:</p>
-                                    <ul className="list-disc pl-4 space-y-2">
-                                        <li><strong>Smart Plugs:</strong> Use a smart plug to cycle power (e.g., charge for 1 hour, off for 2 hours) to avoid keeping the battery at 100% heat.</li>
-                                        <li><strong>Advanced:</strong> If you are comfortable with hardware, some older devices can run directly from a 5V supply if the battery is removed and the terminals are bypassed.</li>
-                                        <li><strong>Heat Dissipation:</strong> Ensure the device is in a well-ventilated area. Remove any protective cases.</li>
-                                    </ul>
-                                </section>
                             </div>
                         )}
                     </main>
 
-                    <footer className="p-4 border-t border-white/5 bg-slate-900/20 text-[8px] text-slate-700 flex justify-between uppercase font-black tracking-widest">
-                        <span>Morgby Tactical v3.2.2</span>
-                        <span>{activeTab === 'manual' ? 'Reading Ops Manual' : 'Active Session'}</span>
+                    <footer className="p-4 border-t border-white/5 bg-slate-900/20 text-[8px] text-slate-700 flex justify-between uppercase font-black tracking-[0.2em]">
+                        <span>Morgby Tactical v3.2.3</span>
+                        <span className="flex items-center gap-1">
+                            <div className={`w-1 h-1 rounded-full ${isOnline ? 'bg-green-900' : 'bg-red-900'}`}></div>
+                            {activeTab === 'manual' ? 'Reading Ops Manual' : 'Active Session'}
+                        </span>
                     </footer>
                 </div>
             );
