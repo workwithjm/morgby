@@ -175,7 +175,6 @@
                                     updateStats();
                                     addLog('Evidence Transmitted', 'success');
                                     isUploading.current = false;
-                                    // Try next one immediately
                                     setTimeout(uploadNext, 500);
                                 };
                             } else {
@@ -189,12 +188,11 @@
                 } catch (e) {
                     isUploading.current = false;
                 }
-            }, [config, updateStats, addLog]);
+            }, [config.botToken, config.chatId, updateStats, addLog]);
 
             const capture = useCallback(async (reason) => {
                 if (!videoRef.current || videoRef.current.readyState < 2) return;
                 
-                // Logic Fix: Only run AI if monitoring is actually active or requested
                 if (config.detectPerson && netRef.current) {
                     try {
                         const preds = await netRef.current.detect(videoRef.current);
@@ -214,12 +212,10 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(videoRef.current, 0, 0);
                 
-                // Burn-in timestamp
                 ctx.fillStyle = 'red';
                 ctx.font = 'bold 20px monospace';
                 ctx.fillText(`MORGBY | ${new Date().toLocaleString()} | ${reason}`, 10, 30);
 
-                // Mobile Fix: Using a explicit blob conversion with quality fallback
                 canvas.toBlob((blob) => {
                     if (!blob) {
                         addLog('Capture failed (Blob null)', 'error');
@@ -236,16 +232,16 @@
                         timestamp: Date.now() 
                     };
                     
-                    const addReq = store.add(entry);
+                    store.add(entry);
                     tx.oncomplete = () => {
                         updateStats();
-                        uploadNext(); // Trigger upload immediately after saving
+                        uploadNext(); 
                     };
                     tx.onerror = () => addLog('Storage Error', 'error');
                 }, 'image/jpeg', 0.85);
                 
                 setLastCaptureTime(new Date());
-            }, [config, updateStats, uploadNext, addLog]);
+            }, [config.detectPerson, updateStats, uploadNext, addLog]);
 
             const startCamera = async () => {
                 addLog('Activating Camera...', 'info');
@@ -295,7 +291,7 @@
                         }
                     }
                 } catch (e) {} finally { isProcessingCommand.current = false; }
-            }, [config, isMonitoring, storageUsed, queueCount, capture]);
+            }, [config.botToken, config.chatId, isMonitoring, storageUsed, queueCount, capture]);
 
             const testConnection = async () => {
                 if (!config.botToken || !config.chatId) return addLog('Credentials missing', 'error');
@@ -320,19 +316,28 @@
                 if (isMonitoring) {
                     setIsMonitoring(false);
                     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-                    if (intervalRef.current) clearInterval(intervalRef.current);
+                    if (intervalRef.current) {
+                        clearInterval(intervalRef.current);
+                        intervalRef.current = null;
+                    }
                     addLog('System Disarmed', 'warning');
                 } else {
                     const ok = await startCamera();
                     if (ok) {
                         setIsMonitoring(true);
                         addLog('SYSTEM ARMED', 'success');
-                        setTimeout(() => capture('Initialization'), 1000);
-                        intervalRef.current = setInterval(() => capture('Scheduled'), config.intervalMinutes * 60000);
+                        setTimeout(() => capture('Initialization'), 1500);
+                        
+                        // Fix: Ensure the interval is cleared before setting a new one
+                        if (intervalRef.current) clearInterval(intervalRef.current);
+                        intervalRef.current = setInterval(() => {
+                            capture('Scheduled');
+                        }, config.intervalMinutes * 60000);
                     }
                 }
             };
 
+            // Effect for global tasks and cleanup
             useEffect(() => {
                 initDB().then(loadAI);
                 const up = () => setIsOnline(true);
@@ -352,6 +357,16 @@
                     if (intervalRef.current) clearInterval(intervalRef.current);
                 };
             }, [pollUpdates, uploadNext]);
+
+            // Effect to handle interval changes while monitoring is active
+            useEffect(() => {
+                if (isMonitoring) {
+                    if (intervalRef.current) clearInterval(intervalRef.current);
+                    intervalRef.current = setInterval(() => {
+                        capture('Scheduled');
+                    }, config.intervalMinutes * 60000);
+                }
+            }, [config.intervalMinutes, isMonitoring, capture]);
 
             return (
                 <div className="flex flex-col h-screen bg-slate-950 text-slate-100">
